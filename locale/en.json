@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "title": "Sidechat",
+    "description": "Branch a session into a sidechat that opens in the right split view, leaving the main session untouched."
+  },
+  "action": {
+    "newSidechat": "New sidechat",
+    "close": "Close sidechat"
+  },
+  "notice": {
+    "forkedFrom": "Forked from"
+  },
+  "row": {
+    "branchTitle": "Sidechat"
+  }
+}

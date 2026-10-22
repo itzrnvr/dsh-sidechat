@@ -1,0 +1,4 @@
+- insert:
+    - id: sidechat
+      name: '@local/dsh-sidechat'
+      config: {}

@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "title": "侧边对话",
+    "description": "将当前会话分支为侧边对话，在右侧分栏中打开，主会话不受影响。"
+  },
+  "action": {
+    "newSidechat": "新建侧边对话",
+    "close": "关闭侧边对话"
+  },
+  "notice": {
+    "forkedFrom": "分支自"
+  },
+  "row": {
+    "branchTitle": "侧边对话"
+  }
+}
