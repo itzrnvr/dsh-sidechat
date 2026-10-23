@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Branch a session into a sidechat that opens in the right split view.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itzrnvr/dsh-sidechat.git"
+  },
+  "homepage": "https://github.com/itzrnvr/dsh-sidechat#readme",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "sidechat", "fork", "session"],
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
