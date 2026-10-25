@@ -394,9 +394,403 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'dsh-sidechat-tree' }, parts);
     }
 
-    /* ------------------------------------------------------------------ *
-     * Styles — inherit host theme tokens; literal colours are artwork only.
-     * ------------------------------------------------------------------ */
+    /* ================================================================== *
+     * Native sidebar replacement (beta, opt-in)
+     *
+     * The shipped sidebar renders a flat session list with no child-row
+     * hook, so the only way to nest a sidechat under its parent is to take
+     * over the `sidebar.workspaces` seat. This occupant declares the same
+     * child slots the shipped browser declares, which makes the shipped
+     * session menu, hover actions, hover card content and leading marks
+     * re-attach here automatically (slot `inject` binds by slot name).
+     * ================================================================== */
+    const REPLACE_FLAG = 'dsh.sidechat.replaceSidebar.v1';
+    const VIEW_KEY = 'dsh.sidechat.sidebarView.v1';
+    const COLLAPSED_KEY = 'dsh.sidechat.sidebarCollapsed.v1';
+    const PAGE_SIZE = 8;
+
+    function readFlag() {
+      try { return window.localStorage.getItem(REPLACE_FLAG) === '1'; } catch (_e) { return false; }
+    }
+
+    function toggleReplace() {
+      const next = !readFlag();
+      try { window.localStorage.setItem(REPLACE_FLAG, next ? '1' : '0'); } catch (_e) { /* ignore */ }
+      try { window.location.reload(); } catch (_e) { /* ignore */ }
+      return next;
+    }
+
+    function readJson(key, fallback) {
+      try {
+        const raw = window.localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch (_e) { return fallback; }
+    }
+
+    function writeJson(key, value) {
+      try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (_e) { /* ignore */ }
+    }
+
+    /** Groups the visible sessions for the current view settings. */
+    function buildGroups(workspaces, sessions, view) {
+      const byId = sessions.byId || {};
+      const archived = new Set(workspaces.archivedSessionIds || []);
+      const pinned = new Set(workspaces.pinnedSessionIds || []);
+      const groups = [];
+      const claimed = new Set();
+
+      const hidden = (id) => {
+        const s = byId[id];
+        if (!s || s.origin === 'subagent') return true;
+        if (view.archived === 'default' && archived.has(id)) return true;
+        if (view.archived === 'only' && !archived.has(id)) return true;
+        return false;
+      };
+
+      for (const ws of workspaces.items || []) {
+        const ids = (ws.sessionIds || []).filter((id) => !hidden(id));
+        for (const id of ids) claimed.add(id);
+        groups.push({ key: ws.workspaceId, workspaceId: ws.workspaceId, label: ws.title, path: ws.path, ids });
+      }
+
+      // Sessions that belong to no workspace still have to be reachable.
+      const loose = (sessions.ids || []).filter((id) => !claimed.has(id) && !hidden(id));
+      if (loose.length > 0) groups.push({ key: 'ungrouped', workspaceId: undefined, label: 'Ungrouped', path: undefined, ids: loose });
+
+      const timeOf = (id) => byId[id]?.updatedAt ?? 0;
+      for (const group of groups) {
+        if (view.order === 'manual') continue;
+        group.ids.sort((a, b) => {
+          const aPinned = pinned.has(a);
+          const bPinned = pinned.has(b);
+          if (aPinned !== bPinned) return aPinned ? -1 : 1;
+          return timeOf(b) - timeOf(a);
+        });
+      }
+      return { groups, byId, archived, pinned };
+    }
+
+    function statusOf(statuses, summary) {
+      const entry = statuses instanceof Map ? statuses.get(summary.id) : undefined;
+      if (entry?.pendingInteraction) return 'warning';
+      if (entry?.running ?? summary.running) return 'ongoing';
+      if (entry?.completionUnread) return 'done';
+      return 'idle';
+    }
+
+    function SidebarBrowser(props) {
+      const { wide, expandSidebar, useWorkspaces, useSessions, useSessionStatus, usePanelInfo, renderSlot, t, services } = props;
+
+      const workspaces = useWorkspaces((value) => value) || {};
+      const sessions = useSessions((value) => value) || {};
+      const statuses = useSessionStatus((value) => value);
+      const panelSuppressed = usePanelInfo((info) => info.activePanelId !== null);
+
+      const [view, setView] = React.useState(() => readJson(VIEW_KEY, { group: 'workspace', order: 'updated', archived: 'default' }));
+      const [collapsedGroups, setCollapsedGroups] = React.useState(() => readJson(COLLAPSED_KEY, {}));
+      const [collapsedTrees, setCollapsedTrees] = React.useState(() => readJson('dsh.sidechat.treeCollapsed.v1', {}));
+      const [query, setQuery] = React.useState('');
+      const [results, setResults] = React.useState(null);
+      const [menuFor, setMenuFor] = React.useState(null);
+      const [hoverFor, setHoverFor] = React.useState(null);
+      const [limit, setLimit] = React.useState({});
+      const [renameFor, setRenameFor] = React.useState(null);
+      const [renameText, setRenameText] = React.useState('');
+
+      React.useEffect(() => { writeJson(VIEW_KEY, view); }, [view]);
+      React.useEffect(() => { writeJson(COLLAPSED_KEY, collapsedGroups); }, [collapsedGroups]);
+      React.useEffect(() => { writeJson('dsh.sidechat.treeCollapsed.v1', collapsedTrees); }, [collapsedTrees]);
+
+      // Host content search, debounced.
+      React.useEffect(() => {
+        const term = query.trim();
+        if (!term) { setResults(null); return undefined; }
+        const controller = new AbortController();
+        const timer = setTimeout(() => {
+          Promise.resolve(services.sessions.search(term, controller.signal))
+            .then((result) => { if (!controller.signal.aborted) setResults(result?.ok === false ? { items: [] } : result?.value ?? result ?? { items: [] }); })
+            .catch(() => { if (!controller.signal.aborted) setResults({ items: [] }); });
+        }, 220);
+        return () => { clearTimeout(timer); controller.abort(); };
+      }, [query, services]);
+
+      const currentId = (sessions.ids || []).find((id) => (sessions.byId?.[id]?.retainedBy?.mainView ?? 0) > 0);
+      const { groups, byId, archived, pinned } = buildGroups(workspaces, sessions, view);
+
+      const openSession = (id) => { try { services.uiWorkspace.openSession(id); } catch (_e) { /* ignore */ } };
+      const titleOf = (id) => byId[id]?.title || 'New Session';
+
+      const startRename = (id) => { setRenameFor(id); setRenameText(titleOf(id)); };
+      const commitRename = () => {
+        const id = renameFor;
+        const text = renameText.trim();
+        setRenameFor(null);
+        if (!id || !text) return;
+        try {
+          services.sessions.using(id, { source: 'sidebarRename' }, (reference) => reference.binding?.session?.rename(text));
+        } catch (_e) { /* ignore */ }
+      };
+
+      const addWorkspace = () => {
+        Promise.resolve()
+          .then(() => services.uiWorkspace.pickDirectory())
+          .then((path) => (path ? services.workspaces.create({ path }) : undefined))
+          .catch((error) => console.error('dsh-sidechat: add workspace failed', error));
+      };
+
+      const sessionRow = (id, depth) => {
+        const summary = byId[id];
+        if (!summary) return null;
+        const selected = !panelSuppressed && id === currentId;
+        const state = statusOf(statuses, summary);
+        const children = childrenOf(id).filter((child) => byId[child]);
+        const treeCollapsed = collapsedTrees[id] === true;
+        const isArchived = archived.has(id);
+
+        const row = h(
+          'div',
+          {
+            key: `row-${id}`,
+            className: `dsh-sb-row${selected ? ' is-selected' : ''}${isArchived ? ' is-archived' : ''}`,
+            style: depth ? { paddingLeft: 10 + depth * 16 } : undefined,
+            'data-session-id': id,
+            role: 'treeitem',
+            'aria-selected': selected ? 'true' : 'false',
+            tabIndex: 0,
+            onClick: () => openSession(id),
+            onDoubleClick: () => startRename(id),
+            onKeyDown: (event) => {
+              if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSession(id); }
+            },
+            onMouseEnter: () => setHoverFor(id),
+            onMouseLeave: () => setHoverFor((value) => (value === id ? null : value)),
+          },
+          depth ? h('span', { className: 'dsh-sb-connector', 'aria-hidden': true }) : null,
+          children.length > 0
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-sb-chevron',
+                  'aria-label': treeCollapsed ? 'Expand sidechats' : 'Collapse sidechats',
+                  'aria-expanded': treeCollapsed ? 'false' : 'true',
+                  onClick: (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setCollapsedTrees((prev) => ({ ...prev, [id]: !prev[id] }));
+                  },
+                },
+                h('svg', { viewBox: '0 0 16 16', width: 10, height: 10, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, style: { transform: treeCollapsed ? 'rotate(-90deg)' : 'none', transition: 'transform .12s' } }, h('path', { d: 'M4 6l4 4 4-4', strokeLinecap: 'round' })),
+              )
+            : h('span', { className: 'dsh-sb-chevron-space', 'aria-hidden': true }),
+          h('span', { className: `dsh-sb-dot is-${state}`, 'aria-hidden': true }),
+          h('span', { className: 'dsh-sb-leading' }, renderSlot('sidebar.session.row.leading', { sessionId: id })),
+          renameFor === id
+            ? h('input', {
+                className: 'dsh-sb-rename',
+                value: renameText,
+                autoFocus: true,
+                onChange: (event) => setRenameText(event.target.value),
+                onClick: (event) => event.stopPropagation(),
+                onBlur: commitRename,
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') { event.preventDefault(); commitRename(); }
+                  if (event.key === 'Escape') { event.preventDefault(); setRenameFor(null); }
+                },
+              })
+            : h('span', { className: 'dsh-sb-title' }, titleOf(id)),
+          pinned.has(id) ? h('span', { className: 'dsh-sb-pin', 'aria-hidden': true }, '•') : null,
+          h('span', { className: 'dsh-sb-time' }, relativeTime(summary.updatedAt)),
+          h(
+            'span',
+            { className: 'dsh-sb-actions' },
+            renderSlot('sidebar.workspaces.session.row.action', { sessionId: id, displayTitle: titleOf(id) }),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-sb-menu-button',
+                'aria-label': 'Session actions',
+                onClick: (event) => { event.preventDefault(); event.stopPropagation(); setMenuFor((value) => (value === id ? null : id)); },
+              },
+              '…',
+            ),
+          ),
+        );
+
+        const nodes = [row];
+
+        if (menuFor === id) {
+          nodes.push(
+            h(
+              'div',
+              { key: `menu-${id}`, className: 'dsh-sb-menu', role: 'menu' },
+              renderSlot(
+                'sidebar.workspaces.session.menu.item',
+                { sessionId: id, displayTitle: titleOf(id) },
+                { hookContext: [true, () => setMenuFor(null)] },
+              ),
+            ),
+          );
+        }
+
+        if (hoverFor === id && !menuFor) {
+          nodes.push(
+            h(
+              'div',
+              { key: `hover-${id}`, className: 'dsh-sb-hover' },
+              h('div', { className: 'dsh-sb-hover-title' }, titleOf(id)),
+              h('div', { className: 'dsh-sb-hover-time' }, relativeTime(summary.updatedAt)),
+              renderSlot('sidebar.session.row.hover', { sessionId: id }),
+            ),
+          );
+        }
+
+        if (children.length > 0 && !treeCollapsed) {
+          const ordered = children.sort((a, b) => (byId[b]?.updatedAt ?? 0) - (byId[a]?.updatedAt ?? 0));
+          for (const child of ordered) nodes.push(sessionRow(child, depth + 1));
+        }
+
+        return h('div', { key: `node-${id}`, className: 'dsh-sb-node' }, nodes);
+      };
+
+      const header = h(
+        'div',
+        { className: 'dsh-sb-header' },
+        h('span', { className: 'dsh-sb-header-title' }, 'Workspaces'),
+        h(
+          'button',
+          { type: 'button', className: 'dsh-sb-icon-button', 'aria-label': 'View options', onClick: () => setView((v) => ({ ...v, group: v.group === 'workspace' ? 'flat' : 'workspace' })) },
+          h('svg', { viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }, h('path', { d: 'M2 4h12M2 8h12M2 12h12', strokeLinecap: 'round' })),
+        ),
+        h(
+          'button',
+          { type: 'button', className: 'dsh-sb-icon-button', 'aria-label': 'Sort by updated', onClick: () => setView((v) => ({ ...v, archived: v.archived === 'default' ? 'show' : v.archived === 'show' ? 'only' : 'default' })) },
+          h('svg', { viewBox: '0 0 16 16', width: 13, height: 13, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }, h('path', { d: 'M8 2v12M5 11l3 3 3-3', strokeLinecap: 'round' })),
+        ),
+      );
+
+      const searchBox = h(
+        'div',
+        { className: 'dsh-sb-search' },
+        h('input', {
+          className: 'dsh-sb-search-input',
+          placeholder: 'Search sessions…',
+          value: query,
+          onChange: (event) => setQuery(event.target.value),
+        }),
+      );
+
+      let body;
+      if (query.trim()) {
+        const items = results?.items ?? [];
+        body = h(
+          'div',
+          { className: 'dsh-sb-list' },
+          results === null
+            ? h('div', { className: 'dsh-sb-empty' }, 'Searching…')
+            : items.length === 0
+              ? h('div', { className: 'dsh-sb-empty' }, 'No sessions found')
+              : items.map((item, index) =>
+                  h(
+                    'div',
+                    {
+                      key: item.id || `r-${index}`,
+                      className: 'dsh-sb-row dsh-sb-result',
+                      role: 'treeitem',
+                      onClick: () => openSession(item.id),
+                    },
+                    h('span', { className: 'dsh-sb-dot is-idle', 'aria-hidden': true }),
+                    h('span', { className: 'dsh-sb-title' }, item.title || item.id),
+                    h('span', { className: 'dsh-sb-time' }, item.workspace || ''),
+                  ),
+                ),
+        );
+      } else if (view.group === 'flat') {
+        const ids = groups.flatMap((group) => group.ids);
+        const shown = ids.slice(0, limit.flat ?? PAGE_SIZE * 2);
+        body = h(
+          'div',
+          { className: 'dsh-sb-list' },
+          shown.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No sessions yet') : shown.map((id) => sessionRow(id, 0)),
+          ids.length > shown.length
+            ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, flat: (l.flat ?? PAGE_SIZE * 2) + PAGE_SIZE })) }, 'Show more')
+            : null,
+        );
+      } else {
+        body = h(
+          'div',
+          { className: 'dsh-sb-list' },
+          groups.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No workspaces yet') : null,
+          groups.map((group) => {
+            const open = collapsedGroups[group.key] !== true;
+            const cap = limit[group.key] ?? PAGE_SIZE;
+            const shown = group.ids.slice(0, cap);
+            return h(
+              'div',
+              { key: group.key, className: 'dsh-sb-group' },
+              h(
+                'div',
+                { className: 'dsh-sb-group-row', title: group.path || '' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-sb-chevron',
+                    'aria-expanded': open ? 'true' : 'false',
+                    'aria-label': open ? 'Collapse' : 'Expand',
+                    onClick: () => setCollapsedGroups((prev) => ({ ...prev, [group.key]: open })),
+                  },
+                  h('svg', { viewBox: '0 0 16 16', width: 10, height: 10, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, style: { transform: open ? 'none' : 'rotate(-90deg)', transition: 'transform .12s' } }, h('path', { d: 'M4 6l4 4 4-4', strokeLinecap: 'round' })),
+                ),
+                h('span', { className: 'dsh-sb-group-title' }, group.label),
+                h('span', { className: 'dsh-sb-group-count' }, String(group.ids.length)),
+                group.workspaceId
+                  ? h(
+                      'span',
+                      { className: 'dsh-sb-group-actions' },
+                      h(
+                        'button',
+                        { type: 'button', className: 'dsh-sb-icon-button', 'aria-label': 'Delete workspace', onClick: () => { try { services.workspaces.delete(group.workspaceId); } catch (_e) { /* ignore */ } } },
+                        h('svg', { viewBox: '0 0 16 16', width: 12, height: 12, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }, h('path', { d: 'M4 4l8 8M12 4l-8 8', strokeLinecap: 'round' })),
+                      ),
+                      h(
+                        'button',
+                        { type: 'button', className: 'dsh-sb-icon-button', 'aria-label': 'New session in workspace', onClick: () => { try { services.uiWorkspace.startSession(group.workspaceId); } catch (_e) { /* ignore */ } } },
+                        h('svg', { viewBox: '0 0 16 16', width: 12, height: 12, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }, h('path', { d: 'M8 3v10M3 8h10', strokeLinecap: 'round' })),
+                      ),
+                    )
+                  : null,
+              ),
+              open
+                ? h(
+                    'div',
+                    { className: 'dsh-sb-group-body' },
+                    shown.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No sessions') : shown.map((id) => sessionRow(id, 0)),
+                    group.ids.length > cap
+                      ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, [group.key]: cap + PAGE_SIZE })) }, `Show ${Math.min(PAGE_SIZE, group.ids.length - cap)} more`)
+                      : null,
+                  )
+                : null,
+            );
+          }),
+        );
+      }
+
+      return h(
+        'div',
+        { className: `dsh-sb-root${wide ? '' : ' is-narrow'}` },
+        header,
+        searchBox,
+        body,
+        h(
+          'button',
+          { type: 'button', className: 'dsh-sb-add', onClick: addWorkspace },
+          h('svg', { viewBox: '0 0 16 16', width: 12, height: 12, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }, h('path', { d: 'M8 3v10M3 8h10', strokeLinecap: 'round' })),
+          h('span', null, 'Add workspace'),
+        ),
+      );
+    }
     const CSS = [
       '.dsh-sidechat-action{',
       'align-items:center;background:transparent;border:0;',
@@ -433,6 +827,96 @@ window.__ModuleLoader__.load({
       '.dsh-sidechat-tree-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
       '.dsh-sidechat-tree-time{',
       'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));flex:none;font-size:10.5px;}',
+      /* ---- replaced sidebar browser ---- */
+      '.dsh-sb-root{display:flex;flex-direction:column;min-height:0;height:100%;gap:2px;}',
+      '.dsh-sb-header{align-items:center;display:flex;gap:2px;padding:2px 4px 2px 8px;}',
+      '.dsh-sb-header-title{',
+      'color:var(--dsw-alias-label-secondary);flex:1;font-size:11px;font-weight:600;',
+      'letter-spacing:.6px;text-transform:uppercase;}',
+      '.dsh-sb-icon-button{',
+      'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;',
+      'display:inline-flex;flex:none;height:20px;justify-content:center;padding:0;width:20px;}',
+      '.dsh-sb-icon-button:hover,.dsh-sb-icon-button:focus-visible{',
+      'background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
+      '.dsh-sb-search{padding:2px 6px 4px;}',
+      '.dsh-sb-search-input{',
+      'background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:var(--dsw-radius-sm,6px);box-sizing:border-box;color:var(--dsw-alias-label-primary);',
+      'font:inherit;font-size:12px;height:26px;outline:none;padding:0 8px;width:100%;}',
+      '.dsh-sb-search-input:focus{border-color:var(--dsw-alias-brand-primary);}',
+      '.dsh-sb-list{display:flex;flex-direction:column;gap:1px;min-height:0;overflow:auto;padding:0 6px;}',
+      '.dsh-sb-group{display:flex;flex-direction:column;gap:1px;margin-bottom:2px;}',
+      '.dsh-sb-group-row{',
+      'align-items:center;border-radius:var(--dsw-radius-sm,6px);color:var(--dsw-alias-label-secondary);',
+      'display:flex;gap:2px;min-height:26px;padding:0 2px 0 0;}',
+      '.dsh-sb-group-row:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.dsh-sb-group-title{',
+      'color:var(--dsw-alias-label-primary);flex:1;font-size:12px;font-weight:600;min-width:0;',
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dsh-sb-group-count{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-size:10.5px;}',
+      '.dsh-sb-group-actions{display:none;gap:1px;}',
+      '.dsh-sb-group-row:hover .dsh-sb-group-actions{display:flex;}',
+      '.dsh-sb-group-body{display:flex;flex-direction:column;gap:1px;}',
+      '.dsh-sb-node{display:flex;flex-direction:column;gap:1px;min-width:0;}',
+      '.dsh-sb-row{',
+      'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-primary);cursor:pointer;display:flex;font-size:12.5px;gap:6px;',
+      'min-height:30px;min-width:0;padding:0 4px 0 2px;position:relative;}',
+      '.dsh-sb-row:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.dsh-sb-row.is-selected{background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-sb-row.is-archived{opacity:.6;}',
+      '.dsh-sb-row:focus-visible{outline:1px solid var(--dsw-alias-brand-primary);outline-offset:-1px;}',
+      '.dsh-sb-chevron{',
+      'align-items:center;background:transparent;border:0;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));',
+      'cursor:pointer;display:inline-flex;flex:none;height:16px;justify-content:center;padding:0;width:16px;}',
+      '.dsh-sb-chevron:hover{color:var(--dsw-alias-label-primary);}',
+      '.dsh-sb-chevron-space{flex:none;width:16px;}',
+      '.dsh-sb-connector{',
+      'border-left:1px solid var(--dsw-alias-border-l2,var(--dsw-alias-border-l1));',
+      'bottom:0;left:14px;position:absolute;top:0;}',
+      '.dsh-sb-dot{border-radius:50%;flex:none;height:5px;width:5px;background:var(--dsw-alias-state-idle-primary);}',
+      '.dsh-sb-dot.is-ongoing{background:var(--dsw-alias-brand-primary);}',
+      '.dsh-sb-dot.is-warning{background:var(--dsw-alias-state-warn-primary);}',
+      '.dsh-sb-dot.is-done{background:var(--dsw-alias-state-success-primary);}',
+      '.dsh-sb-leading{align-items:center;display:inline-flex;flex:none;}',
+      '.dsh-sb-title{',
+      'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dsh-sb-rename{',
+      'background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-brand-primary);',
+      'border-radius:var(--dsw-radius-sm,6px);color:var(--dsw-alias-label-primary);flex:1;font:inherit;',
+      'font-size:12.5px;height:22px;min-width:0;outline:none;padding:0 6px;}',
+      '.dsh-sb-pin{color:var(--dsw-alias-brand-primary);flex:none;font-size:14px;line-height:1;}',
+      '.dsh-sb-time{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));flex:none;font-size:10.5px;}',
+      '.dsh-sb-actions{display:none;align-items:center;flex:none;gap:1px;}',
+      '.dsh-sb-row:hover .dsh-sb-actions{display:flex;}',
+      '.dsh-sb-menu-button{',
+      'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:inline-flex;',
+      'height:20px;justify-content:center;padding:0;width:18px;font-size:13px;line-height:1;}',
+      '.dsh-sb-menu-button:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
+      '.dsh-sb-menu{',
+      'background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:var(--dsw-radius-lg,10px);box-shadow:0 8px 24px rgba(0,0,0,.28);',
+      'display:flex;flex-direction:column;gap:1px;margin:2px 0 4px 18px;padding:4px;z-index:40;}',
+      '.dsh-sb-hover{',
+      'background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:var(--dsw-radius-lg,10px);box-shadow:0 8px 24px rgba(0,0,0,.28);',
+      'display:flex;flex-direction:column;gap:2px;margin:2px 0 4px 18px;padding:8px 10px;z-index:39;}',
+      '.dsh-sb-hover-title{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;}',
+      '.dsh-sb-hover-time{color:var(--dsw-alias-label-secondary);font-size:10.5px;}',
+      '.dsh-sb-more{',
+      'background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:11.5px;',
+      'padding:3px 8px;text-align:left;}',
+      '.dsh-sb-more:hover{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);}',
+      '.dsh-sb-empty{color:var(--dsw-alias-label-secondary);font-size:11.5px;padding:8px 10px;}',
+      '.dsh-sb-result{cursor:pointer;}',
+      '.dsh-sb-add{',
+      'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;flex:none;font:inherit;',
+      'font-size:11.5px;gap:6px;margin:2px 6px 4px;padding:4px 8px;text-align:left;}',
+      '.dsh-sb-add:hover{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);}',
     ].join('');
 
     function insertStyles() {
@@ -449,7 +933,7 @@ window.__ModuleLoader__.load({
      * Module entry
      * ------------------------------------------------------------------ */
     return {
-      inject: ['sessions', 'slots', 'locale', 'sidebarRight'],
+      inject: ['sessions', 'slots', 'locale', 'sidebarRight', 'workspaces', 'uiWorkspace'],
       apply(ctx) {
         // Locale: register our dictionaries, then translate through the
         // service so the UI follows locale changes; local dict fallback.
@@ -571,6 +1055,21 @@ window.__ModuleLoader__.load({
               }),
             'dsh-sidechat: /side command',
           );
+
+          // Escape hatch: toggling reloads the page, so a broken sidebar
+          // replacement can always be switched back off from the composer.
+          ctx.effect(
+            () =>
+              commandUi.register({
+                name: 'sidebar-tree',
+                label: () => (readFlag() ? 'Sidebar tree: on' : 'Sidebar tree: off'),
+                description: () =>
+                  readFlag() ? 'Restore the shipped session list' : 'Replace the session list to nest sidechats under their parent',
+                available: () => true,
+                ui: { kind: 'action', run: () => { toggleReplace(); } },
+              }),
+            'dsh-sidechat: /sidebar-tree command',
+          );
         });
 
         // Sidebar: hover action + "..." menu item on every session row.
@@ -628,6 +1127,39 @@ window.__ModuleLoader__.load({
             ),
           'dsh-sidechat: hover tree',
         );
+
+        // Native sidebar replacement (opt-in). Declaring the shipped child
+        // slots here is what keeps the shipped session menu, hover actions,
+        // leading marks and hover-card content working inside our rows.
+        if (readFlag()) {
+          ctx.effect(
+            () =>
+              ctx.slots.inject('sidebar.workspaces', () =>
+                ctx.slots.register(
+                  {
+                    name: 'sidebar.workspaces',
+                    priority: 100,
+                    children: {
+                      'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
+                      'sidebar.workspaces.session.menu.item': { kind: 'list', scope: 'root' },
+                      'sidebar.workspaces.session.row.action': { kind: 'list', scope: 'root' },
+                      'sidebar.session.row.leading': { kind: 'list', scope: 'root' },
+                      'sidebar.session.row.hover': { kind: 'list', scope: 'root' },
+                    },
+                    inject: () => ({
+                      services: {
+                        sessions: ctx.sessions,
+                        workspaces: ctx.workspaces,
+                        uiWorkspace: ctx.uiWorkspace,
+                      },
+                    }),
+                  },
+                  SidebarBrowser,
+                ),
+              ),
+            'dsh-sidechat: sidebar browser',
+          );
+        }
       },
     };
   },

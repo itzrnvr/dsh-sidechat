@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-sidechat",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Branch a session into a sidechat that opens in the right split view.",
@@ -10,16 +10,31 @@
     "url": "git+https://github.com/itzrnvr/dsh-sidechat.git"
   },
   "homepage": "https://github.com/itzrnvr/dsh-sidechat#readme",
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "sidechat", "fork", "session"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "sidechat",
+    "fork",
+    "session"
+  ],
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg"],
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,

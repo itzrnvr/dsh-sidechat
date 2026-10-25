@@ -48,11 +48,25 @@ Sidechat rows show a small branch glyph. A parent session's hover card lists its
 - A native fork records **no lineage** on the child Session, so the parent → sidechat map is kept in browser storage (`dsh.sidechat.links.v1`) at fork time. That map is what the sidebar glyph and hover tree read.
 - `index.js` is the host half. It registers no services — everything is client-side.
 
+## Sidebar tree (beta)
+
+The shipped sidebar renders a flat session list: it hides subagent sessions entirely and nests only workspaces, so it has no hook for indenting a session under another. To get real child rows, this plugin can take over the `sidebar.workspaces` seat.
+
+Type **`/sidebar-tree`** in the composer to turn it on or off (the page reloads). The setting is a browser flag, so it survives restarts, and the command always remains available in the composer — which means a misbehaving replacement can always be switched back off from there.
+
+The replacement:
+
+- renders workspace groups, session rows, search, archive filter, "Show more" expansion and empty states
+- nests each parent's sidechats beneath it with a chevron, connector line and their own relative times
+- **re-declares the shipped child slots** (`session.menu.item`, `session.row.action`, `row.leading`, `row.hover`, `directoryFlow`), so the shipped pin / rename / fork / archive / copy-id menu entries, the hover buttons, the hover-card content and other plugins' contributions keep working inside the new rows
+
+Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu (group/sort/archive cycling is on the two header buttons), hover-card copy affordances, and row motion animations. Turn it off with `/sidebar-tree` if you rely on those; the rest of the plugin keeps working either way.
+
 ## Known limitations
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
-- **Sidebar nesting is a hover tree, not indented rows.** The shipped sidebar renders a flat session list and exposes no hook for child rows (it hides subagent sessions entirely and nests only workspaces), so a plugin cannot indent a session under another without replacing the entire session browser. Sidechats therefore appear as siblings with a branch glyph, grouped under their parent in the hover card. If you want true inline nesting, the options are a full sidebar replacement or a sidebar-container plugin such as `dsh-better-sidebar`.
-- **Links are per browser.** The parent map lives in `localStorage`, so sidechats created in a different browser profile won't show their glyph or hover tree (the tabs themselves still work).
+- **Nesting needs the beta sidebar.** Without `/sidebar-tree`, the shipped flat list is used and sidechats appear as siblings with a branch glyph, grouped under their parent in the hover card.
+- **Links are per browser.** The parent map lives in `localStorage`, so sidechats created in a different browser profile won't show their glyph or tree position (the tabs themselves still work).
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 
 ## License
