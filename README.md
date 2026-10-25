@@ -14,6 +14,8 @@ Useful when you want to explore a tangent without polluting the main thread: the
 - **Independent.** Continue the sidechat (and the parent) however you like; neither affects the other.
 - **Durable.** Sidechats are normal sessions, and the tab addresses are durable — an open sidechat comes back after a restart.
 - **Multiple at once.** Each sidechat opens as its own tab.
+- **`/side` command.** Type `/side` in the composer to fork the current session into a sidechat. It is a client-owned command, so it appends **no** event to the conversation — the parent's log stays exactly as it was.
+- **Grouped under the parent.** A session's sidechats are listed as an indented tree in its sidebar hover card, with their relative times, and open on click.
 - **Theme and locale aware.** Uses host theme tokens and registers translations (English and Chinese).
 
 ## Install
@@ -28,25 +30,29 @@ Requires a DeepSeek Harness installation that supports bundles (0.2.x).
 
 ## Usage
 
-- Hover a session row in the sidebar and click the **branch** button, or
+- Type `/side` in the composer, or
+- hover a session row in the sidebar and click the **branch** button, or
 - open that session's `⋯` menu and choose **New sidechat**.
 
 The sidechat forks from the current point of the session and opens in the right split view.
 
-Rows that are themselves fork children show a small branch glyph, and their hover card names the parent session.
+Sidechat rows show a small branch glyph. A parent session's hover card lists its sidechats as an indented tree — click one to open its tab; a sidechat's own hover card names the session it was branched from.
 
 ## How it works
 
 - `client.js` registers a resource provider (`dsh-resource://sidechat/session/<childId>`) that retains the forked session and releases it when the tab closes.
 - It declares a right-sidebar tab kind (`sidechat`) plus a tab body that binds the retained session through `SessionProvider`.
 - The conversation is rendered by the shared embedded Conversation factory (`conversation.content` with `variant: 'embedded'`), which is why the sidechat looks and behaves identically to the main session.
+- `/side` is contributed to the client `commandUi` registry with `ui.kind: 'action'`, which runs in the browser and never sends a message or appends a session event.
 - Forking uses the native `sessions.fork()`; the tab is opened with `sidebarRight.openResource()`.
+- A native fork records **no lineage** on the child Session, so the parent → sidechat map is kept in browser storage (`dsh.sidechat.links.v1`) at fork time. That map is what the sidebar glyph and hover tree read.
 - `index.js` is the host half. It registers no services — everything is client-side.
 
 ## Known limitations
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
-- **Sidebar nesting.** Sidechats currently appear as sibling sessions with a branch glyph rather than indented child rows.
+- **Sidebar nesting is a hover tree, not indented rows.** The shipped sidebar renders a flat session list and exposes no hook for child rows (it hides subagent sessions entirely and nests only workspaces), so a plugin cannot indent a session under another without replacing the entire session browser. Sidechats therefore appear as siblings with a branch glyph, grouped under their parent in the hover card. If you want true inline nesting, the options are a full sidebar replacement or a sidebar-container plugin such as `dsh-better-sidebar`.
+- **Links are per browser.** The parent map lives in `localStorage`, so sidechats created in a different browser profile won't show their glyph or hover tree (the tabs themselves still work).
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 
 ## License
