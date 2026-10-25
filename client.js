@@ -74,11 +74,6 @@ window.__ModuleLoader__.load({
       return readLinks()[sessionId];
     }
 
-    function childrenOf(sessionId) {
-      const links = readLinks();
-      return Object.keys(links).filter((child) => links[child] === sessionId);
-    }
-
     /** Opens (or reveals) the right-Sidebar tab for one sidechat. */
     function openSidechatTab(ctx, childSessionId, parentSessionId) {
       try {
@@ -311,9 +306,65 @@ window.__ModuleLoader__.load({
       return `${Math.round(days / 30)}mo`;
     }
 
-    /** The parent a session was branched from, if it is one of our sidechats. */
+    /**
+     * The session a sidechat was branched from.
+     *
+     * Three sources, strongest first:
+     *  1. the explicit map recorded when this plugin performs the fork;
+     *  2. `parentId` from the session list — the harness writes
+     *     `parentSession` into a fork child's header, so sidechats made
+     *     before this plugin tracked links (or by the shipped Fork item)
+     *     resolve here;
+     *  3. the fork title convention `<parent title> (n)`, for children whose
+     *     summary carries no parentId.
+     */
     function resolveParentId(sessions, sessionId) {
-      return parentOf(sessionId) || summaryOf(sessions, sessionId)?.parentId;
+      const linked = parentOf(sessionId);
+      if (linked) return linked;
+
+      const summary = summaryOf(sessions, sessionId);
+      if (!summary) return undefined;
+      if (summary.parentId) return summary.parentId;
+
+      const title = summary.title;
+      if (typeof title !== 'string') return undefined;
+      const match = /^(.*) \((\d+)\)$/.exec(title);
+      if (!match) return undefined;
+      const base = match[1];
+
+      let ids = [];
+      let byId = {};
+      try {
+        const snapshot = sessions.list.getSnapshot();
+        ids = snapshot.ids || [];
+        byId = snapshot.byId || {};
+      } catch (_e) {
+        return undefined;
+      }
+      const candidates = ids.filter((id) => {
+        if (id === sessionId) return false;
+        const other = byId[id];
+        return other !== undefined && other.title === base && other.origin !== 'subagent';
+      });
+      if (candidates.length === 0) return undefined;
+      candidates.sort((a, b) => (byId[b]?.updatedAt ?? 0) - (byId[a]?.updatedAt ?? 0));
+      return candidates[0];
+    }
+
+    /** Every sidechat child of one session, from all lineage sources. */
+    function childrenOfSession(sessions, sessionId) {
+      let ids = [];
+      let byId = {};
+      try {
+        const snapshot = sessions.list.getSnapshot();
+        ids = snapshot.ids || [];
+        byId = snapshot.byId || {};
+      } catch (_e) {
+        return [];
+      }
+      return ids.filter(
+        (id) => id !== sessionId && byId[id] !== undefined && resolveParentId(sessions, id) === sessionId,
+      );
     }
 
     /** Leading branch marker for a session that is a sidechat child. */
@@ -338,7 +389,7 @@ window.__ModuleLoader__.load({
     function SidechatHoverSection(props) {
       const { sessions, sessionId, t, openSidechat } = props;
       const parentId = resolveParentId(sessions, sessionId);
-      const children = childrenOf(sessionId).filter((id) => summaryOf(sessions, id) !== undefined);
+      const children = childrenOfSession(sessions, sessionId).filter((id) => summaryOf(sessions, id) !== undefined);
       if (!parentId && children.length === 0) return null;
 
       const parts = [];
@@ -517,6 +568,20 @@ window.__ModuleLoader__.load({
       const currentId = (sessions.ids || []).find((id) => (sessions.byId?.[id]?.retainedBy?.mainView ?? 0) > 0);
       const { groups, byId, archived, pinned } = buildGroups(workspaces, sessions, view);
 
+      // Which sessions render nested under a parent, and whose children those
+      // are. A child whose parent is not visible stays a top-level row.
+      const visibleIds = new Set(groups.flatMap((group) => group.ids));
+      const childMap = new Map();
+      const nested = new Set();
+      for (const id of visibleIds) {
+        const parent = resolveParentId(sessions, id);
+        if (!parent || parent === id || !visibleIds.has(parent)) continue;
+        nested.add(id);
+        if (!childMap.has(parent)) childMap.set(parent, []);
+        childMap.get(parent).push(id);
+      }
+      const rootIds = (ids) => ids.filter((id) => !nested.has(id));
+
       const openSession = (id) => { try { services.uiWorkspace.openSession(id); } catch (_e) { /* ignore */ } };
       const titleOf = (id) => byId[id]?.title || 'New Session';
 
@@ -543,7 +608,7 @@ window.__ModuleLoader__.load({
         if (!summary) return null;
         const selected = !panelSuppressed && id === currentId;
         const state = statusOf(statuses, summary);
-        const children = childrenOf(id).filter((child) => byId[child]);
+        const children = (childMap.get(id) || []).filter((child) => byId[child]);
         const treeCollapsed = collapsedTrees[id] === true;
         const isArchived = archived.has(id);
 
@@ -707,7 +772,7 @@ window.__ModuleLoader__.load({
                 ),
         );
       } else if (view.group === 'flat') {
-        const ids = groups.flatMap((group) => group.ids);
+        const ids = rootIds(groups.flatMap((group) => group.ids));
         const shown = ids.slice(0, limit.flat ?? PAGE_SIZE * 2);
         body = h(
           'div',
@@ -724,8 +789,9 @@ window.__ModuleLoader__.load({
           groups.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No workspaces yet') : null,
           groups.map((group) => {
             const open = collapsedGroups[group.key] !== true;
+            const ids = rootIds(group.ids);
             const cap = limit[group.key] ?? PAGE_SIZE;
-            const shown = group.ids.slice(0, cap);
+            const shown = ids.slice(0, cap);
             return h(
               'div',
               { key: group.key, className: 'dsh-sb-group' },
@@ -767,8 +833,8 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'dsh-sb-group-body' },
                     shown.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No sessions') : shown.map((id) => sessionRow(id, 0)),
-                    group.ids.length > cap
-                      ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, [group.key]: cap + PAGE_SIZE })) }, `Show ${Math.min(PAGE_SIZE, group.ids.length - cap)} more`)
+                    ids.length > cap
+                      ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, [group.key]: cap + PAGE_SIZE })) }, `Show ${Math.min(PAGE_SIZE, ids.length - cap)} more`)
                       : null,
                   )
                 : null,

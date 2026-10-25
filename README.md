@@ -45,7 +45,7 @@ Sidechat rows show a small branch glyph. A parent session's hover card lists its
 - The conversation is rendered by the shared embedded Conversation factory (`conversation.content` with `variant: 'embedded'`), which is why the sidechat looks and behaves identically to the main session.
 - `/side` is contributed to the client `commandUi` registry with `ui.kind: 'action'`, which runs in the browser and never sends a message or appends a session event.
 - Forking uses the native `sessions.fork()`; the tab is opened with `sidebarRight.openResource()`.
-- A native fork records **no lineage** on the child Session, so the parent → sidechat map is kept in browser storage (`dsh.sidechat.links.v1`) at fork time. That map is what the sidebar glyph and hover tree read.
+- Parentage is resolved from three sources, strongest first: the explicit map this plugin records at fork time (`dsh.sidechat.links.v1`), the `parentSession` a fork writes into the child's stored header (surfaced as `parentId` in the session list), and the fork title convention `<parent title> (n)`. Sidechats created before the plugin tracked links — or with the shipped **Fork** item — therefore still nest correctly.
 - `index.js` is the host half. It registers no services — everything is client-side.
 
 ## Sidebar tree (beta)
@@ -66,7 +66,7 @@ Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu 
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
 - **Nesting needs the beta sidebar.** Without `/sidebar-tree`, the shipped flat list is used and sidechats appear as siblings with a branch glyph, grouped under their parent in the hover card.
-- **Links are per browser.** The parent map lives in `localStorage`, so sidechats created in a different browser profile won't show their glyph or tree position (the tabs themselves still work).
+- **Links are per browser.** The explicit map lives in `localStorage`. Sessions forked from this browser keep their position through the stored `parentSession` header even if the map is cleared; sessions forked elsewhere rely on that header (or the title convention) rather than the map.
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 
 ## License
