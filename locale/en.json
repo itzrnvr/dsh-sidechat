@@ -17,6 +17,7 @@
     "forkedFrom": "Forked from"
   },
   "row": {
-    "branchTitle": "Sidechat"
+    "branchTitle": "Sidechat",
+    "sidechatsTitle": "Sidechats"
   }
 }

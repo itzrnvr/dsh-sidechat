@@ -42,6 +42,56 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ *
+     * Sidechat links — the durable parent → child map.
+     *
+     * A native fork records no lineage on the child Session (its header has
+     * no parentSession/origin), and the shipped sidebar renders a flat list
+     * with no nested session rows. The relationship is therefore kept here,
+     * in browser storage, at the moment the fork happens.
+     * ------------------------------------------------------------------ */
+    const LINK_KEY = 'dsh.sidechat.links.v1';
+
+    function readLinks() {
+      try {
+        const raw = window.localStorage.getItem(LINK_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch (_e) {
+        return {};
+      }
+    }
+
+    function rememberSidechat(parentSessionId, childSessionId) {
+      if (!parentSessionId || !childSessionId) return;
+      try {
+        const links = readLinks();
+        links[childSessionId] = parentSessionId;
+        window.localStorage.setItem(LINK_KEY, JSON.stringify(links));
+      } catch (_e) { /* storage unavailable: nesting degrades, tabs still work */ }
+    }
+
+    function parentOf(sessionId) {
+      return readLinks()[sessionId];
+    }
+
+    function childrenOf(sessionId) {
+      const links = readLinks();
+      return Object.keys(links).filter((child) => links[child] === sessionId);
+    }
+
+    /** Opens (or reveals) the right-Sidebar tab for one sidechat. */
+    function openSidechatTab(ctx, childSessionId, parentSessionId) {
+      try {
+        ctx.sidebarRight.openResource(sidechatAddress(childSessionId, parentSessionId), {
+          kind: SIDECHAT_KIND,
+          preferNewPane: true,
+        });
+      } catch (error) {
+        console.error('dsh-sidechat: failed to open sidechat tab', error);
+      }
+    }
+
+    /* ------------------------------------------------------------------ *
      * Locale — register our dictionaries with the Client locale service so
      * translations follow the user's locale reactively; fall back to a
      * local dictionary when the service is unavailable.
@@ -52,6 +102,7 @@ window.__ModuleLoader__.load({
         'action.close': 'Close sidechat',
         'notice.forkedFrom': 'Forked from',
         'row.branchTitle': 'Sidechat',
+        'row.sidechatsTitle': 'Sidechats',
         'command.side.label': 'Side',
         'command.side.description': 'Fork this session into a sidechat in the right split view',
       },
@@ -60,6 +111,7 @@ window.__ModuleLoader__.load({
         'action.close': '关闭侧边对话',
         'notice.forkedFrom': '分支自',
         'row.branchTitle': '侧边对话',
+        'row.sidechatsTitle': '侧边对话',
         'command.side.label': '侧边',
         'command.side.description': '将当前会话分支为右侧分栏中的侧边对话',
       },
@@ -170,14 +222,8 @@ window.__ModuleLoader__.load({
           sessionId: parentSessionId,
           increaseTitle: true,
           onCreated: (childSessionId) => {
-            try {
-              ctx.sidebarRight.openResource(sidechatAddress(childSessionId, parentSessionId), {
-                kind: SIDECHAT_KIND,
-                preferNewPane: true,
-              });
-            } catch (error) {
-              console.error('dsh-sidechat: failed to open sidechat tab', error);
-            }
+            rememberSidechat(parentSessionId, childSessionId);
+            openSidechatTab(ctx, childSessionId, parentSessionId);
           },
         })
         .catch((error) => {
@@ -252,10 +298,27 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Leading branch marker for a session that IS a fork child. */
+    /** Compact relative time, matching the sidebar's own vocabulary. */
+    function relativeTime(updatedAt) {
+      if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt)) return '';
+      const minutes = Math.max(0, Math.round((Date.now() - updatedAt) / 60000));
+      if (minutes < 1) return 'now';
+      if (minutes < 60) return `${minutes}m`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 24) return `${hours}h`;
+      const days = Math.round(hours / 24);
+      if (days < 30) return `${days}d`;
+      return `${Math.round(days / 30)}mo`;
+    }
+
+    /** The parent a session was branched from, if it is one of our sidechats. */
+    function resolveParentId(sessions, sessionId) {
+      return parentOf(sessionId) || summaryOf(sessions, sessionId)?.parentId;
+    }
+
+    /** Leading branch marker for a session that is a sidechat child. */
     function SidechatBranchMarker(props) {
-      const summary = summaryOf(props.sessions, props.sessionId);
-      if (!summary?.parentId) return null;
+      if (!resolveParentId(props.sessions, props.sessionId)) return null;
       return h(
         'span',
         { className: 'dsh-sidechat-marker', title: props.t('row.branchTitle'), 'aria-hidden': true },
@@ -263,18 +326,72 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** Hover-card line naming the parent a fork child was branched from. */
-    function SidechatParentLine(props) {
-      const summary = summaryOf(props.sessions, props.sessionId);
-      const parentId = summary?.parentId;
-      if (!parentId) return null;
-      const parentTitle = summaryOf(props.sessions, parentId)?.title || parentId;
-      return h(
-        'span',
-        { className: 'dsh-sidechat-parentline' },
-        branchGlyph(),
-        h('span', null, `${props.t('notice.forkedFrom')} ${parentTitle}`),
-      );
+    /**
+     * Hover-card section: names the parent when the session IS a sidechat,
+     * and lists a parent's sidechats as an indented tree (connector line,
+     * title, relative time) that opens each tab on click.
+     *
+     * The shipped sidebar renders a flat session list and offers no inline
+     * row or child-row hook, so the tree lives in the parent's hover card —
+     * the only place a plugin can group sessions under their originator.
+     */
+    function SidechatHoverSection(props) {
+      const { sessions, sessionId, t, openSidechat } = props;
+      const parentId = resolveParentId(sessions, sessionId);
+      const children = childrenOf(sessionId).filter((id) => summaryOf(sessions, id) !== undefined);
+      if (!parentId && children.length === 0) return null;
+
+      const parts = [];
+
+      if (parentId) {
+        const parentTitle = summaryOf(sessions, parentId)?.title || parentId;
+        parts.push(
+          h(
+            'span',
+            { key: 'origin', className: 'dsh-sidechat-parentline' },
+            branchGlyph(),
+            h('span', { className: 'dsh-sidechat-ellipsis' }, `${t('notice.forkedFrom')} ${parentTitle}`),
+          ),
+        );
+      }
+
+      if (children.length > 0) {
+        parts.push(
+          h(
+            'span',
+            { key: 'label', className: 'dsh-sidechat-tree-label' },
+            `${t('row.sidechatsTitle')} · ${children.length}`,
+          ),
+        );
+        const ordered = children
+          .map((id) => ({ id, summary: summaryOf(sessions, id) }))
+          .sort((a, b) => (b.summary?.updatedAt ?? 0) - (a.summary?.updatedAt ?? 0));
+
+        for (const { id, summary } of ordered) {
+          const title = summary?.title || id;
+          parts.push(
+            h(
+              'button',
+              {
+                key: id,
+                type: 'button',
+                className: 'dsh-sidechat-tree-item',
+                title,
+                onClick: (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  openSidechat(id, sessionId);
+                },
+              },
+              branchGlyph(),
+              h('span', { className: 'dsh-sidechat-tree-title' }, title),
+              h('span', { className: 'dsh-sidechat-tree-time' }, relativeTime(summary?.updatedAt)),
+            ),
+          );
+        }
+      }
+
+      return h('span', { className: 'dsh-sidechat-tree' }, parts);
     }
 
     /* ------------------------------------------------------------------ *
@@ -300,7 +417,22 @@ window.__ModuleLoader__.load({
       '.dsh-sidechat-parentline{',
       'align-items:center;color:var(--dsw-alias-label-secondary);display:flex;gap:6px;',
       'font-size:11.5px;min-width:0;}',
-      '.dsh-sidechat-parentline>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dsh-sidechat-ellipsis{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dsh-sidechat-tree{display:flex;flex-direction:column;gap:1px;min-width:0;width:100%;}',
+      '.dsh-sidechat-tree-label{',
+      'color:var(--dsw-alias-label-secondary);font-size:10.5px;font-weight:600;letter-spacing:.6px;',
+      'margin:6px 0 2px;text-transform:uppercase;}',
+      '.dsh-sidechat-tree-item{',
+      'align-items:center;background:transparent;border:0;',
+      'border-left:1px solid var(--dsw-alias-border-l2,var(--dsw-alias-border-l1));',
+      'border-radius:0 var(--dsw-radius-sm,6px) var(--dsw-radius-sm,6px) 0;',
+      'color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;font-size:12px;',
+      'gap:7px;padding:4px 6px 4px 9px;text-align:left;width:100%;}',
+      '.dsh-sidechat-tree-item:hover,.dsh-sidechat-tree-item:focus-visible{',
+      'background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
+      '.dsh-sidechat-tree-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dsh-sidechat-tree-time{',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));flex:none;font-size:10.5px;}',
     ].join('');
 
     function insertStyles() {
@@ -478,18 +610,23 @@ window.__ModuleLoader__.load({
           'dsh-sidechat: branch marker',
         );
 
-        // Sidebar: hover-card line naming the parent session.
+        // Sidebar: hover card — a parent's sidechats as an indented tree, and
+        // the parent's name on a sidechat row.
         ctx.effect(
           () =>
             ctx.slots.inject('sidebar.session.row.hover', () =>
               ctx.slots.register(
                 { name: 'sidebar.session.row.hover', id: 'dsh-sidechat/parent', order: 100 },
                 withCreate((props) =>
-                  h(SidechatParentLine, { ...props, sessions: ctx.sessions }),
+                  h(SidechatHoverSection, {
+                    ...props,
+                    sessions: ctx.sessions,
+                    openSidechat: (childId, parentId) => openSidechatTab(ctx, childId, parentId),
+                  }),
                 ),
               ),
             ),
-          'dsh-sidechat: parent line',
+          'dsh-sidechat: hover tree',
         );
       },
     };

@@ -17,6 +17,7 @@
     "forkedFrom": "分支自"
   },
   "row": {
-    "branchTitle": "侧边对话"
+    "branchTitle": "侧边对话",
+    "sidechatsTitle": "侧边对话"
   }
 }
