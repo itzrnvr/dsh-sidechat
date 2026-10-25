@@ -48,11 +48,11 @@ Sidechat rows show a small branch glyph. A parent session's hover card lists its
 - Parentage is resolved from three sources, strongest first: the explicit map this plugin records at fork time (`dsh.sidechat.links.v1`), the `parentSession` a fork writes into the child's stored header (surfaced as `parentId` in the session list), and the fork title convention `<parent title> (n)`. Sidechats created before the plugin tracked links — or with the shipped **Fork** item — therefore still nest correctly.
 - `index.js` is the host half. It registers no services — everything is client-side.
 
-## Sidebar tree (beta)
+## Sidebar tree
 
-The shipped sidebar renders a flat session list: it hides subagent sessions entirely and nests only workspaces, so it has no hook for indenting a session under another. To get real child rows, this plugin can take over the `sidebar.workspaces` seat.
+The shipped sidebar renders a flat session list: it hides subagent sessions entirely and nests only workspaces, so it has no hook for indenting a session under another. To get real child rows, this plugin takes over the `sidebar.workspaces` seat. **This is on by default** — no setup step.
 
-Type **`/sidebar-tree`** in the composer to turn it on or off (the page reloads). The setting is a browser flag, so it survives restarts, and the command always remains available in the composer — which means a misbehaving replacement can always be switched back off from there.
+If you ever want the default list back, type **`/sidebar-tree`** in the composer (the page reloads). Type it again to switch back. The setting survives restarts, and the command always works from the composer, so a bad render can always be undone.
 
 The replacement:
 
@@ -65,7 +65,7 @@ Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu 
 ## Known limitations
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
-- **Nesting needs the beta sidebar.** Without `/sidebar-tree`, the shipped flat list is used and sidechats appear as siblings with a branch glyph, grouped under their parent in the hover card.
+- **Nesting needs the sidebar tree.** With the tree turned off (`/sidebar-tree`), the default flat list is used and sidechats appear as siblings with a branch glyph, grouped under their parent in the hover card.
 - **Links are per browser.** The explicit map lives in `localStorage`. Sessions forked from this browser keep their position through the stored `parentSession` header even if the map is cleared; sessions forked elsewhere rely on that header (or the title convention) rather than the map.
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 

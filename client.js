@@ -446,7 +446,7 @@ window.__ModuleLoader__.load({
     }
 
     /* ================================================================== *
-     * Native sidebar replacement (beta, opt-in)
+     * Native sidebar replacement
      *
      * The shipped sidebar renders a flat session list with no child-row
      * hook, so the only way to nest a sidechat under its parent is to take
@@ -460,13 +460,17 @@ window.__ModuleLoader__.load({
     const COLLAPSED_KEY = 'dsh.sidechat.sidebarCollapsed.v1';
     const PAGE_SIZE = 8;
 
-    function readFlag() {
-      try { return window.localStorage.getItem(REPLACE_FLAG) === '1'; } catch (_e) { return false; }
+    /** The replacement is on unless it was explicitly turned off. */
+    function replaceEnabled() {
+      try { return window.localStorage.getItem(REPLACE_FLAG) !== '0'; } catch (_e) { return true; }
     }
 
     function toggleReplace() {
-      const next = !readFlag();
-      try { window.localStorage.setItem(REPLACE_FLAG, next ? '1' : '0'); } catch (_e) { /* ignore */ }
+      const next = !replaceEnabled();
+      try {
+        if (next) window.localStorage.removeItem(REPLACE_FLAG);
+        else window.localStorage.setItem(REPLACE_FLAG, '0');
+      } catch (_e) { /* ignore */ }
       try { window.location.reload(); } catch (_e) { /* ignore */ }
       return next;
     }
@@ -1128,9 +1132,9 @@ window.__ModuleLoader__.load({
             () =>
               commandUi.register({
                 name: 'sidebar-tree',
-                label: () => (readFlag() ? 'Sidebar tree: on' : 'Sidebar tree: off'),
+                label: () => (replaceEnabled() ? 'Sidebar tree: on' : 'Sidebar tree: off'),
                 description: () =>
-                  readFlag() ? 'Restore the shipped session list' : 'Replace the session list to nest sidechats under their parent',
+                  replaceEnabled() ? 'Turn the nested session tree off and restore the default list' : 'Turn the nested session tree back on',
                 available: () => true,
                 ui: { kind: 'action', run: () => { toggleReplace(); } },
               }),
@@ -1197,7 +1201,7 @@ window.__ModuleLoader__.load({
         // Native sidebar replacement (opt-in). Declaring the shipped child
         // slots here is what keeps the shipped session menu, hover actions,
         // leading marks and hover-card content working inside our rows.
-        if (readFlag()) {
+        if (replaceEnabled()) {
           ctx.effect(
             () =>
               ctx.slots.inject('sidebar.workspaces', () =>
