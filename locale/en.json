@@ -7,6 +7,12 @@
     "newSidechat": "New sidechat",
     "close": "Close sidechat"
   },
+  "command": {
+    "side": {
+      "label": "Side",
+      "description": "Fork this session into a sidechat in the right split view"
+    }
+  },
   "notice": {
     "forkedFrom": "Forked from"
   },

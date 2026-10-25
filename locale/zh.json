@@ -7,6 +7,12 @@
     "newSidechat": "新建侧边对话",
     "close": "关闭侧边对话"
   },
+  "command": {
+    "side": {
+      "label": "侧边",
+      "description": "将当前会话分支为右侧分栏中的侧边对话"
+    }
+  },
   "notice": {
     "forkedFrom": "分支自"
   },

@@ -52,12 +52,16 @@ window.__ModuleLoader__.load({
         'action.close': 'Close sidechat',
         'notice.forkedFrom': 'Forked from',
         'row.branchTitle': 'Sidechat',
+        'command.side.label': 'Side',
+        'command.side.description': 'Fork this session into a sidechat in the right split view',
       },
       zh: {
         'action.newSidechat': '新建侧边对话',
         'action.close': '关闭侧边对话',
         'notice.forkedFrom': '分支自',
         'row.branchTitle': '侧边对话',
+        'command.side.label': '侧边',
+        'command.side.description': '将当前会话分支为右侧分栏中的侧边对话',
       },
     };
 
@@ -412,6 +416,30 @@ window.__ModuleLoader__.load({
             ),
           'dsh-sidechat: conversation host',
         );
+
+        // `/side` — a client-owned command. `kind: 'action'` runs entirely in
+        // the browser: it never sends a message and never appends a session
+        // event, so the parent session's log stays untouched.
+        ctx.inject(['commandUi'], (scope) => {
+          const commandUi = scope.commandUi ?? (typeof ctx.get === 'function' ? ctx.get('commandUi') : undefined);
+          if (!commandUi) return;
+          ctx.effect(
+            () =>
+              commandUi.register({
+                name: 'side',
+                label: () => t('command.side.label'),
+                description: () => t('command.side.description'),
+                available: () => true,
+                ui: {
+                  kind: 'action',
+                  run: (session) => {
+                    void createSidechat(ctx, (session && session.sessionId) || currentSessionId);
+                  },
+                },
+              }),
+            'dsh-sidechat: /side command',
+          );
+        });
 
         // Sidebar: hover action + "..." menu item on every session row.
         ctx.effect(
