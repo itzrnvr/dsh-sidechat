@@ -4,6 +4,23 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
+    /**
+     * Resolve a Client service lazily.
+     *
+     * Declaring a name in `inject` that is not a registered Client service
+     * parks the plugin in "loading" forever, which fails the whole web boot.
+     * Optional services are therefore looked up on use instead.
+     */
+    function serviceOf(ctx, name) {
+      try {
+        if (typeof ctx.get === 'function') {
+          const found = ctx.get(name);
+          if (found !== undefined) return found;
+        }
+      } catch (_e) { /* fall through to the property */ }
+      return ctx[name];
+    }
+
     /* ------------------------------------------------------------------ *
      * Identity + durable addressing
      *
@@ -77,7 +94,12 @@ window.__ModuleLoader__.load({
     /** Opens (or reveals) the right-Sidebar tab for one sidechat. */
     function openSidechatTab(ctx, childSessionId, parentSessionId) {
       try {
-        ctx.sidebarRight.openResource(sidechatAddress(childSessionId, parentSessionId), {
+        const sidebarRight = serviceOf(ctx, 'sidebarRight');
+        if (!sidebarRight || typeof sidebarRight.openResource !== 'function') {
+          console.error('dsh-sidechat: right sidebar service unavailable');
+          return;
+        }
+        sidebarRight.openResource(sidechatAddress(childSessionId, parentSessionId), {
           kind: SIDECHAT_KIND,
           preferNewPane: true,
         });
@@ -212,7 +234,12 @@ window.__ModuleLoader__.load({
      * ------------------------------------------------------------------ */
     function createSidechat(ctx, parentSessionId) {
       if (!parentSessionId) return Promise.resolve();
-      return ctx.sessions
+      const sessions = serviceOf(ctx, 'sessions');
+      if (!sessions || typeof sessions.fork !== 'function') {
+        console.error('dsh-sidechat: sessions service unavailable');
+        return Promise.resolve();
+      }
+      return sessions
         .fork({
           sessionId: parentSessionId,
           increaseTitle: true,
@@ -283,14 +310,21 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** Accepts either the sessions service or an already-taken list snapshot. */
+    function snapshotOf(sessions) {
+      if (!sessions) return {};
+      try {
+        if (sessions.list && typeof sessions.list.getSnapshot === 'function') {
+          return sessions.list.getSnapshot() || {};
+        }
+      } catch (_e) { /* fall through */ }
+      return sessions;
+    }
+
     /** Reads one session summary without subscribing; rows re-render with
      *  the list anyway, so a plain snapshot read stays fresh. */
     function summaryOf(sessions, sessionId) {
-      try {
-        return sessions.list.getSnapshot().byId?.[sessionId];
-      } catch (_e) {
-        return undefined;
-      }
+      return snapshotOf(sessions).byId?.[sessionId];
     }
 
     /** Compact relative time, matching the sidebar's own vocabulary. */
@@ -326,25 +360,26 @@ window.__ModuleLoader__.load({
       if (!summary) return undefined;
       if (summary.parentId) return summary.parentId;
 
-      const title = summary.title;
+      // Host-published lineage: the projection republishes the fork header's
+      // parentSession, which the session list itself only exposes for
+      // subagent rows.
+      const projected = summary.projectionValues?.sidechat?.parentId;
+      if (typeof projected === 'string' && projected.length > 0) return projected;
+
+      const title = summary.displayTitle || summary.title;
       if (typeof title !== 'string') return undefined;
       const match = /^(.*) \((\d+)\)$/.exec(title);
       if (!match) return undefined;
       const base = match[1];
 
-      let ids = [];
-      let byId = {};
-      try {
-        const snapshot = sessions.list.getSnapshot();
-        ids = snapshot.ids || [];
-        byId = snapshot.byId || {};
-      } catch (_e) {
-        return undefined;
-      }
+      const snapshot = snapshotOf(sessions);
+      const ids = snapshot.ids || [];
+      const byId = snapshot.byId || {};
       const candidates = ids.filter((id) => {
         if (id === sessionId) return false;
         const other = byId[id];
-        return other !== undefined && other.title === base && other.origin !== 'subagent';
+        const otherTitle = other && (other.displayTitle || other.title);
+        return otherTitle === base && other.origin !== 'subagent';
       });
       if (candidates.length === 0) return undefined;
       candidates.sort((a, b) => (byId[b]?.updatedAt ?? 0) - (byId[a]?.updatedAt ?? 0));
@@ -353,15 +388,9 @@ window.__ModuleLoader__.load({
 
     /** Every sidechat child of one session, from all lineage sources. */
     function childrenOfSession(sessions, sessionId) {
-      let ids = [];
-      let byId = {};
-      try {
-        const snapshot = sessions.list.getSnapshot();
-        ids = snapshot.ids || [];
-        byId = snapshot.byId || {};
-      } catch (_e) {
-        return [];
-      }
+      const snapshot = snapshotOf(sessions);
+      const ids = snapshot.ids || [];
+      const byId = snapshot.byId || {};
       return ids.filter(
         (id) => id !== sessionId && byId[id] !== undefined && resolveParentId(sessions, id) === sessionId,
       );
@@ -395,7 +424,8 @@ window.__ModuleLoader__.load({
       const parts = [];
 
       if (parentId) {
-        const parentTitle = summaryOf(sessions, parentId)?.title || parentId;
+        const parentSummary = summaryOf(sessions, parentId);
+        const parentTitle = parentSummary?.displayTitle || parentSummary?.title || parentId;
         parts.push(
           h(
             'span',
@@ -419,7 +449,7 @@ window.__ModuleLoader__.load({
           .sort((a, b) => (b.summary?.updatedAt ?? 0) - (a.summary?.updatedAt ?? 0));
 
         for (const { id, summary } of ordered) {
-          const title = summary?.title || id;
+          const title = summary?.displayTitle || summary?.title || id;
           parts.push(
             h(
               'button',
@@ -587,7 +617,7 @@ window.__ModuleLoader__.load({
       const rootIds = (ids) => ids.filter((id) => !nested.has(id));
 
       const openSession = (id) => { try { services.uiWorkspace.openSession(id); } catch (_e) { /* ignore */ } };
-      const titleOf = (id) => byId[id]?.title || 'New Session';
+      const titleOf = (id) => byId[id]?.displayTitle || byId[id]?.title || 'New Session';
 
       const startRename = (id) => { setRenameFor(id); setRenameText(titleOf(id)); };
       const commitRename = () => {
@@ -1002,9 +1032,15 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ *
      * Module entry
      * ------------------------------------------------------------------ */
-    return {
-      inject: ['sessions', 'slots', 'locale', 'sidebarRight', 'workspaces', 'uiWorkspace'],
-      apply(ctx) {
+    const exported = {};
+    exported.inject = ['sessions', 'slots', 'locale'];
+    exported.apply = (ctx) => {
+        // Services the plugin can live without. Resolved on use so a name
+        // the profile does not provide can never block activation.
+        const sessionsService = () => serviceOf(ctx, 'sessions');
+        const workspacesService = () => serviceOf(ctx, 'workspaces');
+        const uiWorkspaceService = () => serviceOf(ctx, 'uiWorkspace');
+
         // Locale: register our dictionaries, then translate through the
         // service so the UI follows locale changes; local dict fallback.
         const localeState = { t: localTranslator(ctx) };
@@ -1025,7 +1061,9 @@ window.__ModuleLoader__.load({
         // target still act on the session the user is looking at.
         let currentSessionId;
         const refreshCurrent = () => {
-          const snapshot = ctx.sessions.list.getSnapshot();
+          const sessions = sessionsService();
+          if (!sessions || !sessions.list) return;
+          const snapshot = sessions.list.getSnapshot();
           const ids = snapshot.ids || [];
           currentSessionId =
             ids.find((id) => (snapshot.byId?.[id]?.retainedBy?.mainView ?? 0) > 0) ?? ids[0];
@@ -1033,7 +1071,9 @@ window.__ModuleLoader__.load({
         ctx.effect(() => {
           try {
             refreshCurrent();
-            return ctx.sessions.list.subscribe(refreshCurrent);
+            const sessions = sessionsService();
+            if (!sessions || !sessions.list) return undefined;
+            return sessions.list.subscribe(refreshCurrent);
           } catch (_e) {
             return undefined;
           }
@@ -1048,7 +1088,7 @@ window.__ModuleLoader__.load({
         // shipped reference reaches them through a nested inject so the
         // plugin still loads in a profile that lacks them.
         ctx.inject(['resources', 'sidebarRightTabs'], (scope) => {
-          const sessions = scope.sessions ?? ctx.sessions;
+          const sessions = sessionsService() ?? scope.sessions;
 
           // Resource provider owns the retained Session for each open tab.
           ctx.effect(
@@ -1070,7 +1110,8 @@ window.__ModuleLoader__.load({
                 title: (address) => {
                   const child = parseSidechatAddress(address)?.childSessionId;
                   if (child === undefined) return t('row.branchTitle');
-                  return summaryOf(ctx.sessions, child)?.title || t('row.branchTitle');
+                  const childSummary = summaryOf(sessionsService(), child);
+                  return childSummary?.displayTitle || childSummary?.title || t('row.branchTitle');
                 },
               }),
             'dsh-sidechat: tab type',
@@ -1172,7 +1213,7 @@ window.__ModuleLoader__.load({
               ctx.slots.register(
                 { name: 'sidebar.session.row.leading', id: 'dsh-sidechat/marker', order: 100 },
                 withCreate((props) =>
-                  h(SidechatBranchMarker, { ...props, sessions: ctx.sessions }),
+                  h(SidechatBranchMarker, { ...props, sessions: sessionsService() }),
                 ),
               ),
             ),
@@ -1189,7 +1230,7 @@ window.__ModuleLoader__.load({
                 withCreate((props) =>
                   h(SidechatHoverSection, {
                     ...props,
-                    sessions: ctx.sessions,
+                    sessions: sessionsService(),
                     openSidechat: (childId, parentId) => openSidechatTab(ctx, childId, parentId),
                   }),
                 ),
@@ -1218,9 +1259,9 @@ window.__ModuleLoader__.load({
                     },
                     inject: () => ({
                       services: {
-                        sessions: ctx.sessions,
-                        workspaces: ctx.workspaces,
-                        uiWorkspace: ctx.uiWorkspace,
+                        get sessions() { return sessionsService(); },
+                        get workspaces() { return workspacesService(); },
+                        get uiWorkspace() { return uiWorkspaceService(); },
                       },
                     }),
                   },
@@ -1230,7 +1271,7 @@ window.__ModuleLoader__.load({
             'dsh-sidechat: sidebar browser',
           );
         }
-      },
     };
+    return exported;
   },
 });

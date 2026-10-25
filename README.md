@@ -45,8 +45,8 @@ Sidechat rows show a small branch glyph. A parent session's hover card lists its
 - The conversation is rendered by the shared embedded Conversation factory (`conversation.content` with `variant: 'embedded'`), which is why the sidechat looks and behaves identically to the main session.
 - `/side` is contributed to the client `commandUi` registry with `ui.kind: 'action'`, which runs in the browser and never sends a message or appends a session event.
 - Forking uses the native `sessions.fork()`; the tab is opened with `sidebarRight.openResource()`.
-- Parentage is resolved from three sources, strongest first: the explicit map this plugin records at fork time (`dsh.sidechat.links.v1`), the `parentSession` a fork writes into the child's stored header (surfaced as `parentId` in the session list), and the fork title convention `<parent title> (n)`. Sidechats created before the plugin tracked links — or with the shipped **Fork** item — therefore still nest correctly.
-- `index.js` is the host half. It registers no services — everything is client-side.
+- Parentage comes from the host: a fork writes `parentSession` into the child Session's stored header, and `index.js` republishes it as a session projection (`projectionValues.sidechat.parentId`) because the Client session list only surfaces that field for subagent rows. The Client then resolves a sidechat's parent from that projection, falling back to an explicit map recorded at fork time (`dsh.sidechat.links.v1`) and finally to the fork title convention `<parent title> (n)`. Sidechats created before this plugin existed — or with the shipped **Fork** item — therefore still nest correctly.
+- `index.js` registers that one projection; everything else is client-side.
 
 ## Sidebar tree
 
@@ -66,7 +66,7 @@ Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu 
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
 - **Nesting needs the sidebar tree.** With the tree turned off (`/sidebar-tree`), the default flat list is used and sidechats appear as siblings with a branch glyph, grouped under their parent in the hover card.
-- **Links are per browser.** The explicit map lives in `localStorage`. Sessions forked from this browser keep their position through the stored `parentSession` header even if the map is cleared; sessions forked elsewhere rely on that header (or the title convention) rather than the map.
+- **Links are per browser, lineage is not.** Parentage normally comes from the host projection, so it works in any browser. The `localStorage` map is only a fallback for the current browser.
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 
 ## License
