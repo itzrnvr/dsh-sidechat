@@ -18,7 +18,12 @@ window.__ModuleLoader__.load({
           if (found !== undefined) return found;
         }
       } catch (_e) { /* fall through to the property */ }
-      return ctx[name];
+      try {
+        return ctx[name];
+      } catch (_e) {
+        // A name this plugin did not inject cannot be read from the context.
+        return undefined;
+      }
     }
 
     /* ------------------------------------------------------------------ *
@@ -239,14 +244,15 @@ window.__ModuleLoader__.load({
         console.error('dsh-sidechat: sessions service unavailable');
         return Promise.resolve();
       }
+      // The runtime's fork() resolves with the child id and accepts no
+      // callback, so the tab is opened from the resolved promise.
       return sessions
-        .fork({
-          sessionId: parentSessionId,
-          increaseTitle: true,
-          onCreated: (childSessionId) => {
-            rememberSidechat(parentSessionId, childSessionId);
-            openSidechatTab(ctx, childSessionId, parentSessionId);
-          },
+        .fork({ sessionId: parentSessionId, increaseTitle: true })
+        .then((childSessionId) => {
+          if (!childSessionId) return undefined;
+          rememberSidechat(parentSessionId, childSessionId);
+          openSidechatTab(ctx, childSessionId, parentSessionId);
+          return childSessionId;
         })
         .catch((error) => {
           console.error('dsh-sidechat: fork failed', error);
@@ -564,20 +570,32 @@ window.__ModuleLoader__.load({
     }
 
     function SidebarBrowser(props) {
-      const { wide, expandSidebar, useWorkspaces, useSessions, useSessionStatus, usePanelInfo, renderSlot, t, services } = props;
+      const { wide, expandSidebar, useWorkspaces, useSessions, renderSlot, t } = props;
+      
+      // Newer shells no longer pass `useSessionStatus` / `usePanelInfo`; the
+      // status is read off each session summary instead (running /
+      // pendingInteraction / completed), so both hooks are optional.
+      const useSessionStatus = typeof props.useSessionStatus === 'function' ? props.useSessionStatus : null;
+      const usePanelInfo = typeof props.usePanelInfo === 'function' ? props.usePanelInfo : null;
+      const services = props.services || {};
 
       const workspaces = useWorkspaces((value) => value) || {};
       const sessions = useSessions((value) => value) || {};
-      const statuses = useSessionStatus((value) => value);
-      const panelSuppressed = usePanelInfo((info) => info.activePanelId !== null);
+      const statuses = useSessionStatus ? useSessionStatus((value) => value) : null;
+      const panelSuppressed = usePanelInfo ? usePanelInfo((info) => info.activePanelId !== null) : false;
+
+      // A child slot that is absent in this shell version must not crash the row.
+      const renderChild = (name, owner) => {
+        if (typeof renderSlot !== 'function') return null;
+        try { return renderSlot(name, owner); } catch (_e) { return null; }
+      };
 
       const [view, setView] = React.useState(() => readJson(VIEW_KEY, { group: 'workspace', order: 'updated', archived: 'default' }));
       const [collapsedGroups, setCollapsedGroups] = React.useState(() => readJson(COLLAPSED_KEY, {}));
       const [collapsedTrees, setCollapsedTrees] = React.useState(() => readJson('dsh.sidechat.treeCollapsed.v1', {}));
       const [query, setQuery] = React.useState('');
       const [results, setResults] = React.useState(null);
-      const [menuFor, setMenuFor] = React.useState(null);
-      const [hoverFor, setHoverFor] = React.useState(null);
+      const [menu, setMenu] = React.useState(null);
       const [limit, setLimit] = React.useState({});
       const [renameFor, setRenameFor] = React.useState(null);
       const [renameText, setRenameText] = React.useState('');
@@ -586,13 +604,46 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { writeJson(COLLAPSED_KEY, collapsedGroups); }, [collapsedGroups]);
       React.useEffect(() => { writeJson('dsh.sidechat.treeCollapsed.v1', collapsedTrees); }, [collapsedTrees]);
 
+      // Row action menu: a fixed overlay anchored to the button, so opening it
+      // never reflows the list.
+      const openMenu = (id, event) => {
+        const rect = event && event.currentTarget && event.currentTarget.getBoundingClientRect
+          ? event.currentTarget.getBoundingClientRect()
+          : null;
+        const width = 208;
+        const top = rect ? Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 248)) : 0;
+        const left = rect ? Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8) : 0;
+        setMenu((prev) => (prev && prev.id === id ? null : { id, top, left }));
+      };
+
+      React.useEffect(() => {
+        if (!menu) return undefined;
+        const onDown = (event) => {
+          const target = event.target;
+          if (target && target.closest && (target.closest('.dsh-sb-menu-list') || target.closest('.dsh-sb-menu-button'))) return;
+          setMenu(null);
+        };
+        const onKey = (event) => { if (event.key === 'Escape') setMenu(null); };
+        const onScroll = () => setMenu(null);
+        document.addEventListener('mousedown', onDown, true);
+        document.addEventListener('keydown', onKey, true);
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onScroll);
+        return () => {
+          document.removeEventListener('mousedown', onDown, true);
+          document.removeEventListener('keydown', onKey, true);
+          window.removeEventListener('scroll', onScroll, true);
+          window.removeEventListener('resize', onScroll);
+        };
+      }, [menu]);
+
       // Host content search, debounced.
       React.useEffect(() => {
         const term = query.trim();
         if (!term) { setResults(null); return undefined; }
         const controller = new AbortController();
         const timer = setTimeout(() => {
-          Promise.resolve(services.sessions.search(term, controller.signal))
+          Promise.resolve(services.sessions?.search?.(term, controller.signal))
             .then((result) => { if (!controller.signal.aborted) setResults(result?.ok === false ? { items: [] } : result?.value ?? result ?? { items: [] }); })
             .catch(() => { if (!controller.signal.aborted) setResults({ items: [] }); });
         }, 220);
@@ -616,8 +667,62 @@ window.__ModuleLoader__.load({
       }
       const rootIds = (ids) => ids.filter((id) => !nested.has(id));
 
-      const openSession = (id) => { try { services.uiWorkspace.openSession(id); } catch (_e) { /* ignore */ } };
+      // Newer shells expose session switching on the client `sessions` service
+      // (`sessions.open`); the older `uiWorkspace.openSession` is kept as a
+      // fallback so the list works across shell versions.
+      const openMain = (id) => {
+        const ui = services.uiWorkspace;
+        if (ui && typeof ui.openSession === 'function') {
+          try { ui.openSession(id); return true; } catch (_e) { /* fall through */ }
+        }
+        if (services.sessions && typeof services.sessions.open === 'function') {
+          try { services.sessions.open(id); return true; } catch (_e) { /* ignore */ }
+        }
+        return false;
+      };
+
+      // Opening a branch row puts its parent on the main stage and the branch
+      // itself in the right split view, so a sidechat never replaces the main
+      // session the way a plain session open would.
+      const openSession = (id) => {
+        try {
+          const parent = resolveParentId(sessions, id);
+          if (props.sidechat && parent && parent !== id && byId[parent]) {
+            openMain(parent);
+            props.sidechat.open(id, parent);
+            return;
+          }
+        } catch (_e) { /* fall back to the plain open */ }
+        openMain(id);
+      };
       const titleOf = (id) => byId[id]?.displayTitle || byId[id]?.title || 'New Session';
+
+      // Fork this row into a sidechat on the right split view, without
+      // touching the main stage.
+      const createSidechatFor = (id) => {
+        try {
+          if (props.sidechat && typeof props.sidechat.create === 'function') props.sidechat.create(id);
+        } catch (error) {
+          console.error('dsh-sidechat: create failed', error);
+        }
+      };
+
+      // The shipped row menu's own items, reproduced over the same services so
+      // this list is not a reduced copy of the native one.
+      const forkSession = (id) => {
+        try {
+          Promise.resolve(services.sessions.fork({ sessionId: id, increaseTitle: true }))
+            .then((childId) => {
+              if (!childId) return;
+              rememberSidechat(id, childId);
+              openMain(childId);
+            })
+            .catch(() => {});
+        } catch (_e) { /* ignore */ }
+      };
+      const archiveSession = (id) => {
+        try { Promise.resolve(services.workspaces.archiveSession(id)).catch(() => {}); } catch (_e) { /* ignore */ }
+      };
 
       const startRename = (id) => { setRenameFor(id); setRenameText(titleOf(id)); };
       const commitRename = () => {
@@ -630,10 +735,22 @@ window.__ModuleLoader__.load({
         } catch (_e) { /* ignore */ }
       };
 
+      // The desktop app installs a native directory picker on `globalThis`;
+      // plain web shells pick through `uiWorkspace`. Support both.
+      const pickDirectory = () => {
+        const desktop = typeof globalThis !== 'undefined' ? globalThis.__DSH_DIRECTORY_PICKER__ : undefined;
+        if (desktop && typeof desktop.pick === 'function') return desktop.pick();
+        if (services.uiWorkspace && typeof services.uiWorkspace.pickDirectory === 'function') return services.uiWorkspace.pickDirectory();
+        return Promise.resolve(null);
+      };
       const addWorkspace = () => {
         Promise.resolve()
-          .then(() => services.uiWorkspace.pickDirectory())
-          .then((path) => (path ? services.workspaces.create({ path }) : undefined))
+          .then(() => pickDirectory())
+          .then((path) => {
+            if (!path) return undefined;
+            const target = services.workspaces && typeof services.workspaces.create === 'function' ? services.workspaces : workspaces;
+            return target.create ? target.create({ path }) : undefined;
+          })
           .catch((error) => console.error('dsh-sidechat: add workspace failed', error));
       };
 
@@ -661,9 +778,7 @@ window.__ModuleLoader__.load({
             onKeyDown: (event) => {
               if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSession(id); }
             },
-            onMouseEnter: () => setHoverFor(id),
-            onMouseLeave: () => setHoverFor((value) => (value === id ? null : value)),
-          },
+            },
           depth ? h('span', { className: 'dsh-sb-connector', 'aria-hidden': true }) : null,
           children.length > 0
             ? h(
@@ -683,7 +798,7 @@ window.__ModuleLoader__.load({
               )
             : h('span', { className: 'dsh-sb-chevron-space', 'aria-hidden': true }),
           h('span', { className: `dsh-sb-dot is-${state}`, 'aria-hidden': true }),
-          h('span', { className: 'dsh-sb-leading' }, renderSlot('sidebar.session.row.leading', { sessionId: id })),
+          h('span', { className: 'dsh-sb-leading' }, renderChild('sidebar.session.row.leading', { sessionId: id })),
           renameFor === id
             ? h('input', {
                 className: 'dsh-sb-rename',
@@ -703,14 +818,29 @@ window.__ModuleLoader__.load({
           h(
             'span',
             { className: 'dsh-sb-actions' },
-            renderSlot('sidebar.workspaces.session.row.action', { sessionId: id, displayTitle: titleOf(id) }),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-sb-split',
+                title: 'New sidechat',
+                'aria-label': 'New sidechat',
+                onClick: (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  createSidechatFor(id);
+                },
+              },
+              branchGlyph(),
+            ),
+            renderChild('sidebar.workspaces.session.row.action', { sessionId: id, displayTitle: titleOf(id) }),
             h(
               'button',
               {
                 type: 'button',
                 className: 'dsh-sb-menu-button',
                 'aria-label': 'Session actions',
-                onClick: (event) => { event.preventDefault(); event.stopPropagation(); setMenuFor((value) => (value === id ? null : id)); },
+                onClick: (event) => { event.preventDefault(); event.stopPropagation(); openMenu(id, event); },
               },
               '…',
             ),
@@ -718,32 +848,6 @@ window.__ModuleLoader__.load({
         );
 
         const nodes = [row];
-
-        if (menuFor === id) {
-          nodes.push(
-            h(
-              'div',
-              { key: `menu-${id}`, className: 'dsh-sb-menu', role: 'menu' },
-              renderSlot(
-                'sidebar.workspaces.session.menu.item',
-                { sessionId: id, displayTitle: titleOf(id) },
-                { hookContext: [true, () => setMenuFor(null)] },
-              ),
-            ),
-          );
-        }
-
-        if (hoverFor === id && !menuFor) {
-          nodes.push(
-            h(
-              'div',
-              { key: `hover-${id}`, className: 'dsh-sb-hover' },
-              h('div', { className: 'dsh-sb-hover-title' }, titleOf(id)),
-              h('div', { className: 'dsh-sb-hover-time' }, relativeTime(summary.updatedAt)),
-              renderSlot('sidebar.session.row.hover', { sessionId: id }),
-            ),
-          );
-        }
 
         if (children.length > 0 && !treeCollapsed) {
           const ordered = children.sort((a, b) => (byId[b]?.updatedAt ?? 0) - (byId[a]?.updatedAt ?? 0));
@@ -889,6 +993,39 @@ window.__ModuleLoader__.load({
           h('svg', { viewBox: '0 0 16 16', width: 12, height: 12, fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 }, h('path', { d: 'M8 3v10M3 8h10', strokeLinecap: 'round' })),
           h('span', null, 'Add workspace'),
         ),
+        menu
+          ? h(
+              'div',
+              {
+                key: 'session-menu',
+                className: 'dsh-sb-menu-list',
+                role: 'menu',
+                style: { position: 'fixed', top: `${menu.top}px`, left: `${menu.left}px` },
+              },
+              [
+                ['rename', 'Rename', () => { setMenu(null); startRename(menu.id); }],
+                ['sidechat', 'New sidechat', () => { setMenu(null); createSidechatFor(menu.id); }],
+                ['fork', 'Fork', () => { setMenu(null); forkSession(menu.id); }],
+                ['archive', 'Archive session', () => { setMenu(null); archiveSession(menu.id); }],
+              ].map(([key, label, action]) =>
+                h(
+                  'button',
+                  {
+                    key,
+                    type: 'button',
+                    role: 'menuitem',
+                    className: 'dsh-sb-menu-item',
+                    onClick: (event) => { event.preventDefault(); event.stopPropagation(); action(); },
+                  },
+                  label,
+                ),
+              ),
+              renderChild(
+                'sidebar.workspaces.session.menu.item',
+                { sessionId: menu.id, displayTitle: titleOf(menu.id) },
+              ),
+            )
+          : null,
       );
     }
     const CSS = [
@@ -988,23 +1125,33 @@ window.__ModuleLoader__.load({
       'font-size:12.5px;height:22px;min-width:0;outline:none;padding:0 6px;}',
       '.dsh-sb-pin{color:var(--dsw-alias-brand-primary);flex:none;font-size:14px;line-height:1;}',
       '.dsh-sb-time{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));flex:none;font-size:10.5px;}',
-      '.dsh-sb-actions{display:none;align-items:center;flex:none;gap:1px;}',
-      '.dsh-sb-row:hover .dsh-sb-actions{display:flex;}',
+      '.dsh-sb-actions{',
+      'position:absolute;right:2px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:1px;',
+      'opacity:0;pointer-events:none;padding:0 2px;border-radius:var(--dsw-radius-sm,6px);',
+      'background:var(--dsw-alias-bg-layer-1);}',
+      '.dsh-sb-row.is-selected .dsh-sb-actions{background:var(--dsw-alias-bg-layer-2);}',
+      '.dsh-sb-row:hover .dsh-sb-actions,.dsh-sb-row:focus-within .dsh-sb-actions{opacity:1;pointer-events:auto;}',
+      '.dsh-sb-row:hover .dsh-sb-time,.dsh-sb-row:focus-within .dsh-sb-time{visibility:hidden;}',
+      '.dsh-sb-split{',
+      'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:inline-flex;',
+      'height:20px;justify-content:center;padding:0;width:18px;}',
+      '.dsh-sb-split:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-brand-primary);}',
       '.dsh-sb-menu-button{',
       'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
       'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:inline-flex;',
       'height:20px;justify-content:center;padding:0;width:18px;font-size:13px;line-height:1;}',
       '.dsh-sb-menu-button:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}',
-      '.dsh-sb-menu{',
+      '.dsh-sb-menu-list{',
       'background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);',
-      'border-radius:var(--dsw-radius-lg,10px);box-shadow:0 8px 24px rgba(0,0,0,.28);',
-      'display:flex;flex-direction:column;gap:1px;margin:2px 0 4px 18px;padding:4px;z-index:40;}',
-      '.dsh-sb-hover{',
-      'background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);',
-      'border-radius:var(--dsw-radius-lg,10px);box-shadow:0 8px 24px rgba(0,0,0,.28);',
-      'display:flex;flex-direction:column;gap:2px;margin:2px 0 4px 18px;padding:8px 10px;z-index:39;}',
-      '.dsh-sb-hover-title{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;}',
-      '.dsh-sb-hover-time{color:var(--dsw-alias-label-secondary);font-size:10.5px;}',
+      'border-radius:var(--dsw-radius-lg,10px);box-shadow:0 14px 34px rgba(0,0,0,.34);',
+      'display:flex;flex-direction:column;gap:1px;padding:4px;width:208px;z-index:2000;}',
+      '.dsh-sb-menu-item{',
+      'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'color:var(--dsw-alias-label-primary);cursor:pointer;display:flex;font:inherit;font-size:12px;',
+      'gap:8px;padding:6px 8px;text-align:left;width:100%;}',
+      '.dsh-sb-menu-item:hover,.dsh-sb-menu-item:focus-visible{',
+      'background:var(--dsw-alias-bg-layer-2);outline:none;}',
       '.dsh-sb-more{',
       'background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
       'color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:11.5px;',
@@ -1249,19 +1396,18 @@ window.__ModuleLoader__.load({
                 ctx.slots.register(
                   {
                     name: 'sidebar.workspaces',
-                    priority: 100,
-                    children: {
-                      'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
-                      'sidebar.workspaces.session.menu.item': { kind: 'list', scope: 'root' },
-                      'sidebar.workspaces.session.row.action': { kind: 'list', scope: 'root' },
-                      'sidebar.session.row.leading': { kind: 'list', scope: 'root' },
-                      'sidebar.session.row.hover': { kind: 'list', scope: 'root' },
-                    },
+                    // Slots render the LOWEST priority occupant, so shadowing
+                    // the shipped browser (priority 0) needs a negative one.
+                    priority: -1,
                     inject: () => ({
                       services: {
                         get sessions() { return sessionsService(); },
                         get workspaces() { return workspacesService(); },
                         get uiWorkspace() { return uiWorkspaceService(); },
+                      },
+                      sidechat: {
+                        create: (id) => openSidechatFor(id),
+                        open: (childId, parentId) => openSidechatTab(ctx, childId, parentId),
                       },
                     }),
                   },

@@ -15,7 +15,7 @@ Useful when you want to explore a tangent without polluting the main thread: the
 - **Durable.** Sidechats are normal sessions, and the tab addresses are durable — an open sidechat comes back after a restart.
 - **Multiple at once.** Each sidechat opens as its own tab.
 - **`/side` command.** Type `/side` in the composer to fork the current session into a sidechat. It is a client-owned command, so it appends **no** event to the conversation — the parent's log stays exactly as it was.
-- **Grouped under the parent.** A session's sidechats are listed as an indented tree in its sidebar hover card, with their relative times, and open on click.
+- **Grouped under the parent.** Sidechats are indented beneath their parent session in the sidebar tree, with their own chevron and relative time. Clicking a child row opens the parent on the main stage and the sidechat in the right split view.
 - **Theme and locale aware.** Uses host theme tokens and registers translations (English and Chinese).
 
 ## Install
@@ -36,7 +36,7 @@ Requires a DeepSeek Harness installation that supports bundles (0.2.x).
 
 The sidechat forks from the current point of the session and opens in the right split view.
 
-Sidechat rows show a small branch glyph. A parent session's hover card lists its sidechats as an indented tree — click one to open its tab; a sidechat's own hover card names the session it was branched from.
+Sidechat rows show a branch glyph. A child row is indented under its parent; clicking it opens the parent in the main pane and the sidechat in the right split view. Hovering a row reveals its **branch** and `⋯` buttons as an overlay, so the list never reflows; the `⋯` menu offers Rename, New sidechat, Fork and Archive session.
 
 ## How it works
 
@@ -58,9 +58,9 @@ The replacement:
 
 - renders workspace groups, session rows, search, archive filter, "Show more" expansion and empty states
 - nests each parent's sidechats beneath it with a chevron, connector line and their own relative times
-- **re-declares the shipped child slots** (`session.menu.item`, `session.row.action`, `row.leading`, `row.hover`, `directoryFlow`), so the shipped pin / rename / fork / archive / copy-id menu entries, the hover buttons, the hover-card content and other plugins' contributions keep working inside the new rows
+- keeps row actions (`branch`, `⋯`) as an absolutely-positioned overlay revealed on hover or focus, so opening them never shifts the list, and anchors the action menu to the row as a fixed popover
 
-Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu (group/sort/archive cycling is on the two header buttons), hover-card copy affordances, and row motion animations. Turn it off with `/sidebar-tree` if you rely on those; the rest of the plugin keeps working either way.
+Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu (group/sort/archive cycling is on the two header buttons), the shipped hover card (copy ID, message count, sidechat list), and row motion animations. Turn it off with `/sidebar-tree` if you rely on those; the rest of the plugin keeps working either way.
 
 ## Known limitations
 
