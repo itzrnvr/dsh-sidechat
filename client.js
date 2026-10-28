@@ -275,6 +275,21 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** Fork glyph — a normal fork, i.e. a full session branched from another. */
+    function forkGlyph() {
+      return h(
+        'svg',
+        {
+          viewBox: '0 0 16 16', width: 11, height: 11, fill: 'none',
+          stroke: 'currentColor', strokeWidth: 1.4, 'aria-hidden': true, style: { flex: 'none' },
+        },
+        h('circle', { cx: '4.3', cy: '3.6', r: '1.7' }),
+        h('circle', { cx: '4.3', cy: '12.4', r: '1.7' }),
+        h('circle', { cx: '11.7', cy: '8', r: '1.7' }),
+        h('path', { d: 'M6 3.6h1.6a2 2 0 0 1 2 2v.9M6 12.4h1.6a2 2 0 0 0 2-2v-.9', strokeLinecap: 'round' }),
+      );
+    }
+
     function NewSidechatAction(props) {
       const label = props.t('action.newSidechat');
       return h(
@@ -347,49 +362,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The session a sidechat was branched from.
+     * The session a SIDECHAT was branched from.
      *
-     * Three sources, strongest first:
-     *  1. the explicit map recorded when this plugin performs the fork;
-     *  2. `parentId` from the session list — the harness writes
-     *     `parentSession` into a fork child's header, so sidechats made
-     *     before this plugin tracked links (or by the shipped Fork item)
-     *     resolve here;
-     *  3. the fork title convention `<parent title> (n)`, for children whose
-     *     summary carries no parentId.
+     * Only the explicit map recorded when this plugin creates a sidechat counts.
+     * A normal fork also carries `parentSession` in its header, so trusting the
+     * header here would turn every fork into a sidechat child — the caller
+     * wants a sidechat parent only for links this plugin wrote.
      */
     function resolveParentId(sessions, sessionId) {
-      const linked = parentOf(sessionId);
-      if (linked) return linked;
+      return parentOf(sessionId);
+    }
 
+    /**
+     * The session a NORMAL fork was branched from, from the host projection
+     * (the fork header's `parentSession`, republished by index.js). Used only
+     * to badge a fork row — never to nest it.
+     */
+    function forkParentOf(sessions, sessionId) {
       const summary = summaryOf(sessions, sessionId);
-      if (!summary) return undefined;
-      if (summary.parentId) return summary.parentId;
-
-      // Host-published lineage: the projection republishes the fork header's
-      // parentSession, which the session list itself only exposes for
-      // subagent rows.
+      if (!summary || summary.origin === 'subagent') return undefined;
+      if (parentOf(sessionId)) return undefined; // sidechats are not plain forks
       const projected = summary.projectionValues?.sidechat?.parentId;
       if (typeof projected === 'string' && projected.length > 0) return projected;
-
-      const title = summary.displayTitle || summary.title;
-      if (typeof title !== 'string') return undefined;
-      const match = /^(.*) \((\d+)\)$/.exec(title);
-      if (!match) return undefined;
-      const base = match[1];
-
-      const snapshot = snapshotOf(sessions);
-      const ids = snapshot.ids || [];
-      const byId = snapshot.byId || {};
-      const candidates = ids.filter((id) => {
-        if (id === sessionId) return false;
-        const other = byId[id];
-        const otherTitle = other && (other.displayTitle || other.title);
-        return otherTitle === base && other.origin !== 'subagent';
-      });
-      if (candidates.length === 0) return undefined;
-      candidates.sort((a, b) => (byId[b]?.updatedAt ?? 0) - (byId[a]?.updatedAt ?? 0));
-      return candidates[0];
+      if (typeof summary.parentId === 'string' && summary.parentId.length > 0) return summary.parentId;
+      return undefined;
     }
 
     /** Every sidechat child of one session, from all lineage sources. */
@@ -600,6 +596,7 @@ window.__ModuleLoader__.load({
       const [renameFor, setRenameFor] = React.useState(null);
       const [renameText, setRenameText] = React.useState('');
       const [toast, setToast] = React.useState(null);
+      const [linksTick, setLinksTick] = React.useState(0);
 
       React.useEffect(() => { writeJson(VIEW_KEY, view); }, [view]);
       React.useEffect(() => { writeJson(COLLAPSED_KEY, collapsedGroups); }, [collapsedGroups]);
@@ -680,6 +677,19 @@ window.__ModuleLoader__.load({
         copyText(text).then((ok) => {
           if (ok) setToast({ text: label, top, left });
         });
+      };
+
+      // Turn an old sidechat link into a plain fork (the child stays a real
+      // session; it just stops nesting). Useful for forks recorded as sidechats
+      // before the two kinds were separated.
+      const detachSidechat = (id) => {
+        try {
+          const links = readLinks();
+          delete links[id];
+          window.localStorage.setItem(LINK_KEY, JSON.stringify(links));
+        } catch (_e) { /* storage unavailable */ }
+        setMenu(null);
+        setLinksTick((value) => value + 1);
       };
 
       React.useEffect(() => {
@@ -770,14 +780,14 @@ window.__ModuleLoader__.load({
         }
       };
 
-      // The shipped row menu's own items, reproduced over the same services so
-      // this list is not a reduced copy of the native one.
+      // Fork is a NORMAL fork: a full, top-level session. It is deliberately
+      // NOT remembered as a sidechat link — only `/side` and the branch button
+      // create sidechats — and it opens in the main stage.
       const forkSession = (id) => {
         try {
           Promise.resolve(services.sessions.fork({ sessionId: id, increaseTitle: true }))
             .then((childId) => {
               if (!childId) return;
-              rememberSidechat(id, childId);
               openMain(childId);
             })
             .catch(() => {});
@@ -825,6 +835,10 @@ window.__ModuleLoader__.load({
         const children = (childMap.get(id) || []).filter((child) => byId[child]);
         const treeCollapsed = collapsedTrees[id] === true;
         const isArchived = archived.has(id);
+        const forkParent = forkParentOf(sessions, id);
+        const forkParentTitle = forkParent
+          ? (byId[forkParent]?.displayTitle || byId[forkParent]?.title || forkParent)
+          : '';
 
         const row = h(
           'div',
@@ -886,6 +900,17 @@ window.__ModuleLoader__.load({
                 },
               })
             : h('span', { className: 'dsh-sb-title' }, titleOf(id)),
+          forkParent
+            ? h(
+                'span',
+                {
+                  className: 'dsh-sb-fork',
+                  title: `Forked from ${forkParentTitle}`,
+                  'aria-label': `Forked from ${forkParentTitle}`,
+                },
+                forkGlyph(),
+              )
+            : null,
           pinned.has(id) ? h('span', { className: 'dsh-sb-pin', 'aria-hidden': true }, '•') : null,
           h('span', { className: 'dsh-sb-time' }, relativeTime(summary.updatedAt)),
           h(
@@ -1087,6 +1112,8 @@ window.__ModuleLoader__.load({
                     ['sidechat', 'New sidechat', () => { setMenu(null); createSidechatFor(menu.id); }],
                     ['fork', 'Fork', () => { setMenu(null); forkSession(menu.id); }],
                     ['archive', 'Archive session', () => { setMenu(null); archiveSession(menu.id); }],
+                    parentOf(menu.id) ? ['sep'] : null,
+                    parentOf(menu.id) ? ['detach', 'Detach from parent', () => detachSidechat(menu.id)] : null,
                   ]
                 : [
                     ['rename', 'Rename', () => { setMenu(null); startRename(menu.id); }],
@@ -1214,9 +1241,19 @@ window.__ModuleLoader__.load({
       'border-left:1px solid var(--dsw-alias-border-l2,var(--dsw-alias-border-l1));',
       'bottom:0;left:14px;position:absolute;top:0;}',
       '.dsh-sb-dot{border-radius:50%;flex:none;height:5px;width:5px;background:var(--dsw-alias-state-idle-primary);}',
-      '.dsh-sb-dot.is-ongoing{background:var(--dsw-alias-brand-primary);}',
+      '.dsh-sb-dot.is-ongoing{',
+      'height:9px;width:9px;margin:-2px;background:transparent;',
+      'border:1.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.18));',
+      'border-top-color:var(--dsw-alias-brand-primary);border-right-color:var(--dsw-alias-brand-primary);',
+      'animation:dsh-sb-spin .9s linear infinite;}',
+      '@keyframes dsh-sb-spin{to{transform:rotate(360deg)}}',
+      '@media (prefers-reduced-motion: reduce){.dsh-sb-dot.is-ongoing{animation-duration:2.4s}}',
       '.dsh-sb-dot.is-warning{background:var(--dsw-alias-state-warn-primary);}',
       '.dsh-sb-dot.is-done{background:var(--dsw-alias-state-success-primary);}',
+      '.dsh-sb-fork{',
+      'align-items:center;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));',
+      'display:inline-flex;flex:none;}',
+      '.dsh-sb-fork:hover{color:var(--dsw-alias-label-primary);}',
       '.dsh-sb-leading{align-items:center;display:inline-flex;flex:none;}',
       '.dsh-sb-title{',
       'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',

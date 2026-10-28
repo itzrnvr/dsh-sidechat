@@ -16,6 +16,10 @@ Useful when you want to explore a tangent without polluting the main thread: the
 - **Multiple at once.** Each sidechat opens as its own tab.
 - **`/side` command.** Type `/side` in the composer to fork the current session into a sidechat. It is a client-owned command, so it appends **no** event to the conversation — the parent's log stays exactly as it was.
 - **Grouped under the parent.** Sidechats are indented beneath their parent session in the sidebar tree, with their own chevron and relative time. Clicking a child row opens the parent on the main stage and the sidechat in the right split view.
+- **Normal forks stay normal.** The row menu's **Fork** creates an ordinary, top-level session and opens it in the main pane — only `/side` and the branch button create sidechats. A forked session shows a small **fork glyph** (hover it to see which session it came from).
+- **Live indicator.** A running session shows a spinning ring instead of the static status dot.
+
+![A fork opens as a full session; the sidebar marks it with a fork glyph](docs/forks.png)
 - **Theme and locale aware.** Uses host theme tokens and registers translations (English and Chinese).
 
 ## Install
@@ -42,6 +46,7 @@ Sidechat rows show a branch glyph. A child row is indented under its parent; cli
 
 - **Copy session ID**, **Copy title**, and **Copy workspace path** (when the session belongs to a workspace) — each confirms with a short toast
 - Rename, New sidechat, Fork and Archive session
+- **Detach from parent** on a sidechat row: keeps the session but makes it a normal top-level fork (handy for forks recorded as sidechats by older versions)
 
 ![Right-click context menu on a session](docs/context-menu.png)
 
@@ -52,7 +57,7 @@ Sidechat rows show a branch glyph. A child row is indented under its parent; cli
 - The conversation is rendered by the shared embedded Conversation factory (`conversation.content` with `variant: 'embedded'`), which is why the sidechat looks and behaves identically to the main session.
 - `/side` is contributed to the client `commandUi` registry with `ui.kind: 'action'`, which runs in the browser and never sends a message or appends a session event.
 - Forking uses the native `sessions.fork()`; the tab is opened with `sidebarRight.openResource()`.
-- Parentage comes from the host: a fork writes `parentSession` into the child Session's stored header, and `index.js` republishes it as a session projection (`projectionValues.sidechat.parentId`) because the Client session list only surfaces that field for subagent rows. The Client then resolves a sidechat's parent from that projection, falling back to an explicit map recorded at fork time (`dsh.sidechat.links.v1`) and finally to the fork title convention `<parent title> (n)`. Sidechats created before this plugin existed — or with the shipped **Fork** item — therefore still nest correctly.
+- Parentage has two separate notions. A **sidechat** is a child only when this plugin recorded the fork in its link map (`dsh.sidechat.links.v1`); a **normal fork** is a full session, and its header lineage (republished by `index.js` as `projectionValues.sidechat.parentId`) is used solely for the fork glyph and its tooltip.
 - `index.js` registers that one projection; everything else is client-side.
 
 ## Sidebar tree
@@ -73,8 +78,8 @@ Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu 
 ## Known limitations
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
-- **Nesting needs the sidebar tree.** With the tree turned off (`/sidebar-tree`), the default flat list is used and sidechats appear as siblings with a branch glyph, grouped under their parent in the hover card.
-- **Links are per browser, lineage is not.** Parentage normally comes from the host projection, so it works in any browser. The `localStorage` map is only a fallback for the current browser.
+- **Nesting needs the sidebar tree.** With the tree turned off (`/sidebar-tree`), the default flat list is used and sidechats appear as sibling sessions (each still opens its own right-pane tab from the `⋯` menu).
+- **Links are per browser.** Sidechat nesting comes from the browser's own link map, so a sidechat opened from another browser or machine shows up as a normal fork row (with the fork glyph). Use the right-click **Detach from parent** to turn an old child row into a plain fork.
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 
 ## License
