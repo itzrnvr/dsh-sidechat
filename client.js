@@ -599,6 +599,7 @@ window.__ModuleLoader__.load({
       const [limit, setLimit] = React.useState({});
       const [renameFor, setRenameFor] = React.useState(null);
       const [renameText, setRenameText] = React.useState('');
+      const [toast, setToast] = React.useState(null);
 
       React.useEffect(() => { writeJson(VIEW_KEY, view); }, [view]);
       React.useEffect(() => { writeJson(COLLAPSED_KEY, collapsedGroups); }, [collapsedGroups]);
@@ -637,6 +638,56 @@ window.__ModuleLoader__.load({
         };
       }, [menu]);
 
+      // Right-click menu: follows the pointer and carries the copy actions the
+      // shipped sidebar keeps in its hover card (the replacement has none).
+      const openContextMenu = (id, x, y) => {
+        const width = 208;
+        const height = 300;
+        setMenu({
+          id,
+          kind: 'context',
+          top: Math.max(8, Math.min(y, window.innerHeight - height)),
+          left: Math.min(Math.max(8, x), window.innerWidth - width - 8),
+        });
+      };
+
+      const copyText = (text) => {
+        const fallback = () => {
+          try {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(area);
+            return ok;
+          } catch (_e) { return false; }
+        };
+        const clip = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+        if (clip && typeof clip.writeText === 'function') {
+          return clip.writeText(text).then(() => true, () => fallback());
+        }
+        return Promise.resolve(fallback());
+      };
+
+      const copyAndToast = (text, label) => {
+        const top = menu ? Math.min(window.innerHeight - 44, menu.top + 6) : 72;
+        const left = menu ? menu.left : 24;
+        setMenu(null);
+        copyText(text).then((ok) => {
+          if (ok) setToast({ text: label, top, left });
+        });
+      };
+
+      React.useEffect(() => {
+        if (!toast) return undefined;
+        const timer = setTimeout(() => setToast(null), 1500);
+        return () => clearTimeout(timer);
+      }, [toast]);
+
       // Host content search, debounced.
       React.useEffect(() => {
         const term = query.trim();
@@ -652,6 +703,18 @@ window.__ModuleLoader__.load({
 
       const currentId = (sessions.ids || []).find((id) => (sessions.byId?.[id]?.retainedBy?.mainView ?? 0) > 0);
       const { groups, byId, archived, pinned } = buildGroups(workspaces, sessions, view);
+
+      // Which workspace owns each visible session, for the copy-path action.
+      const workspaceOfSession = new Map();
+      for (const group of groups) {
+        for (const sessionId of group.ids) workspaceOfSession.set(sessionId, group.workspaceId);
+      }
+      const workspacePathFor = (id) => {
+        const workspaceId = workspaceOfSession.get(id);
+        if (!workspaceId) return undefined;
+        const item = (workspaces.items || []).find((workspace) => workspace.workspaceId === workspaceId);
+        return item && typeof item.path === 'string' && item.path.length > 0 ? item.path : undefined;
+      };
 
       // Which sessions render nested under a parent, and whose children those
       // are. A child whose parent is not visible stays a top-level row.
@@ -775,8 +838,18 @@ window.__ModuleLoader__.load({
             tabIndex: 0,
             onClick: () => openSession(id),
             onDoubleClick: () => startRename(id),
+            onContextMenu: (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              openContextMenu(id, event.clientX, event.clientY);
+            },
             onKeyDown: (event) => {
               if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSession(id); }
+              if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                event.preventDefault();
+                const rect = event.currentTarget.getBoundingClientRect();
+                openContextMenu(id, rect.left + 20, rect.bottom + 2);
+              }
             },
             },
           depth ? h('span', { className: 'dsh-sb-connector', 'aria-hidden': true }) : null,
@@ -1002,28 +1075,56 @@ window.__ModuleLoader__.load({
                 role: 'menu',
                 style: { position: 'fixed', top: `${menu.top}px`, left: `${menu.left}px` },
               },
-              [
-                ['rename', 'Rename', () => { setMenu(null); startRename(menu.id); }],
-                ['sidechat', 'New sidechat', () => { setMenu(null); createSidechatFor(menu.id); }],
-                ['fork', 'Fork', () => { setMenu(null); forkSession(menu.id); }],
-                ['archive', 'Archive session', () => { setMenu(null); archiveSession(menu.id); }],
-              ].map(([key, label, action]) =>
-                h(
-                  'button',
-                  {
-                    key,
-                    type: 'button',
-                    role: 'menuitem',
-                    className: 'dsh-sb-menu-item',
-                    onClick: (event) => { event.preventDefault(); event.stopPropagation(); action(); },
-                  },
-                  label,
-                ),
+              (menu.kind === 'context'
+                ? [
+                    ['copy-id', 'Copy session ID', () => copyAndToast(menu.id, 'Session ID copied')],
+                    ['copy-title', 'Copy title', () => copyAndToast(titleOf(menu.id), 'Title copied')],
+                    workspacePathFor(menu.id)
+                      ? ['copy-path', 'Copy workspace path', () => copyAndToast(workspacePathFor(menu.id), 'Workspace path copied')]
+                      : null,
+                    ['sep'],
+                    ['rename', 'Rename', () => { setMenu(null); startRename(menu.id); }],
+                    ['sidechat', 'New sidechat', () => { setMenu(null); createSidechatFor(menu.id); }],
+                    ['fork', 'Fork', () => { setMenu(null); forkSession(menu.id); }],
+                    ['archive', 'Archive session', () => { setMenu(null); archiveSession(menu.id); }],
+                  ]
+                : [
+                    ['rename', 'Rename', () => { setMenu(null); startRename(menu.id); }],
+                    ['sidechat', 'New sidechat', () => { setMenu(null); createSidechatFor(menu.id); }],
+                    ['fork', 'Fork', () => { setMenu(null); forkSession(menu.id); }],
+                    ['archive', 'Archive session', () => { setMenu(null); archiveSession(menu.id); }],
+                  ]
+              ).filter(Boolean).map(([key, label, action]) =>
+                key === 'sep'
+                  ? h('div', { key, className: 'dsh-sb-menu-sep', role: 'separator' })
+                  : h(
+                      'button',
+                      {
+                        key,
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-sb-menu-item',
+                        onClick: (event) => { event.preventDefault(); event.stopPropagation(); action(); },
+                      },
+                      label,
+                    ),
               ),
               renderChild(
                 'sidebar.workspaces.session.menu.item',
                 { sessionId: menu.id, displayTitle: titleOf(menu.id) },
               ),
+            )
+          : null,
+        toast
+          ? h(
+              'div',
+              {
+                key: 'toast',
+                className: 'dsh-sb-toast',
+                role: 'status',
+                style: { top: `${toast.top}px`, left: `${toast.left}px` },
+              },
+              toast.text,
             )
           : null,
       );
@@ -1152,6 +1253,12 @@ window.__ModuleLoader__.load({
       'gap:8px;padding:6px 8px;text-align:left;width:100%;}',
       '.dsh-sb-menu-item:hover,.dsh-sb-menu-item:focus-visible{',
       'background:var(--dsw-alias-bg-layer-2);outline:none;}',
+      '.dsh-sb-menu-sep{background:var(--dsw-alias-border-l1);height:1px;margin:4px 6px;}',
+      '.dsh-sb-toast{',
+      'position:fixed;z-index:2100;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:8px;box-shadow:0 10px 24px rgba(0,0,0,.3);color:var(--dsw-alias-label-primary);',
+      'font-size:11.5px;padding:6px 10px;pointer-events:none;animation:dsh-sb-toast-in .12s ease-out;}',
+      '@keyframes dsh-sb-toast-in{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}',
       '.dsh-sb-more{',
       'background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
       'color:var(--dsw-alias-label-secondary);cursor:pointer;font:inherit;font-size:11.5px;',

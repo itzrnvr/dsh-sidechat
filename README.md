@@ -38,6 +38,13 @@ The sidechat forks from the current point of the session and opens in the right 
 
 Sidechat rows show a branch glyph. A child row is indented under its parent; clicking it opens the parent in the main pane and the sidechat in the right split view. Hovering a row reveals its **branch** and `⋯` buttons as an overlay, so the list never reflows; the `⋯` menu offers Rename, New sidechat, Fork and Archive session.
 
+**Right-click any session row** (or press Shift+F10 / the menu key while it is focused) for the row's context menu:
+
+- **Copy session ID**, **Copy title**, and **Copy workspace path** (when the session belongs to a workspace) — each confirms with a short toast
+- Rename, New sidechat, Fork and Archive session
+
+![Right-click context menu on a session](docs/context-menu.png)
+
 ## How it works
 
 - `client.js` registers a resource provider (`dsh-resource://sidechat/session/<childId>`) that retains the forked session and releases it when the tab closes.
@@ -59,8 +66,9 @@ The replacement:
 - renders workspace groups, session rows, search, archive filter, "Show more" expansion and empty states
 - nests each parent's sidechats beneath it with a chevron, connector line and their own relative times
 - keeps row actions (`branch`, `⋯`) as an absolutely-positioned overlay revealed on hover or focus, so opening them never shifts the list, and anchors the action menu to the row as a fixed popover
+- opens a right-click context menu per session with the copy actions (session ID, title, workspace path) plus rename / sidechat / fork / archive
 
-Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu (group/sort/archive cycling is on the two header buttons), the shipped hover card (copy ID, message count, sidechat list), and row motion animations. Turn it off with `/sidebar-tree` if you rely on those; the rest of the plugin keeps working either way.
+Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu (group/sort/archive cycling is on the two header buttons), the shipped hover card (message count and sidechat list — copy actions now live in the right-click menu), and row motion animations. Turn it off with `/sidebar-tree` if you rely on those; the rest of the plugin keeps working either way.
 
 ## Known limitations
 
