@@ -760,12 +760,30 @@ window.__ModuleLoader__.load({
       };
 
       // Re-link an orphaned child (a sidechat whose browser link was lost on a
-      // port change) as a sidechat of the session it was forked from.
+      // port change) as a sidechat of the session it was forked from. The toast
+      // names the parent, and says so when that parent row is not on screen —
+      // otherwise the row can look unchanged because a child only nests under a
+      // parent that is actually rendered.
       const attachSidechat = (id, parentId) => {
         if (!parentId) return;
+        const top = menu ? Math.min(window.innerHeight - 44, menu.top + 6) : 72;
+        const left = menu ? menu.left : 24;
         rememberSidechat(parentId, id);
         setMenu(null);
         setLinksTick((value) => value + 1);
+        const parentSummary = byId[parentId];
+        const parentTitle = parentSummary
+          ? (parentSummary.displayTitle || parentSummary.title || parentId)
+          : undefined;
+        const parentOnScreen = groups.some((group) => group.ids.includes(parentId));
+        const label = parentTitle ? `Sidechat of ${parentTitle}` : 'Linked as sidechat';
+        setToast({
+          text: parentOnScreen
+            ? label
+            : `${label} — parent row not shown (archived, folded, or another view)`,
+          top,
+          left,
+        });
       };
 
       React.useEffect(() => {
@@ -924,6 +942,12 @@ window.__ModuleLoader__.load({
         const forkParentTitle = forkParent
           ? (byId[forkParent]?.displayTitle || byId[forkParent]?.title || forkParent)
           : '';
+        // A linked child shows its sidechat glyph even when its parent row is
+        // not rendered (folded group, archived, below "Show more").
+        const sidechatParent = parentOf(id);
+        const sidechatParentTitle = sidechatParent
+          ? (byId[sidechatParent]?.displayTitle || byId[sidechatParent]?.title || sidechatParent)
+          : '';
 
         const row = h(
           'div',
@@ -994,6 +1018,17 @@ window.__ModuleLoader__.load({
                   'aria-label': `Forked from ${forkParentTitle}`,
                 },
                 forkGlyph(),
+              )
+            : null,
+          sidechatParent
+            ? h(
+                'span',
+                {
+                  className: 'dsh-sb-sidechat-mark',
+                  title: `Sidechat of ${sidechatParentTitle}`,
+                  'aria-label': `Sidechat of ${sidechatParentTitle}`,
+                },
+                branchGlyph(),
               )
             : null,
           pinned.has(id) ? h('span', { className: 'dsh-sb-pin', 'aria-hidden': true }, '•') : null,
@@ -1342,6 +1377,8 @@ window.__ModuleLoader__.load({
       'align-items:center;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));',
       'display:inline-flex;flex:none;}',
       '.dsh-sb-fork:hover{color:var(--dsw-alias-label-primary);}',
+      '.dsh-sb-sidechat-mark{',
+      'align-items:center;color:var(--dsw-alias-brand-primary);display:inline-flex;flex:none;opacity:.8;}',
       '.dsh-sb-leading{align-items:center;display:inline-flex;flex:none;}',
       '.dsh-sb-title{',
       'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
