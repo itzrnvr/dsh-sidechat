@@ -830,16 +830,20 @@ window.__ModuleLoader__.load({
       };
 
       // Which sessions render nested under a parent, and whose children those
-      // are. A child whose parent is not visible stays a top-level row.
-      const visibleIds = new Set(groups.flatMap((group) => group.ids));
+      // are. Nesting stays inside one workspace group: a child whose parent is
+      // in another group (or not rendered) stays a top-level row in its own
+      // group, otherwise it would vanish from that workspace entirely.
       const childMap = new Map();
       const nested = new Set();
-      for (const id of visibleIds) {
-        const parent = resolveParentId(sessions, id);
-        if (!parent || parent === id || !visibleIds.has(parent)) continue;
-        nested.add(id);
-        if (!childMap.has(parent)) childMap.set(parent, []);
-        childMap.get(parent).push(id);
+      for (const group of groups) {
+        const groupIds = new Set(group.ids);
+        for (const id of group.ids) {
+          const parent = resolveParentId(sessions, id);
+          if (!parent || parent === id || !groupIds.has(parent)) continue;
+          nested.add(id);
+          if (!childMap.has(parent)) childMap.set(parent, []);
+          childMap.get(parent).push(id);
+        }
       }
       const rootIds = (ids) => ids.filter((id) => !nested.has(id));
 
