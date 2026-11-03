@@ -46,7 +46,8 @@ Sidechat rows show a branch glyph. A child row is indented under its parent; cli
 
 - **Copy session ID**, **Copy title**, and **Copy workspace path** (when the session belongs to a workspace) — each confirms with a short toast
 - Rename, New sidechat, Fork and Archive session
-- **Detach from parent** on a sidechat row: keeps the session but makes it a normal top-level fork (handy for forks recorded as sidechats by older versions)
+- **Attach as sidechat** on a fork row: re-nests a sidechat whose link was lost (e.g. one created before links moved to the host)
+- **Detach from parent** on a sidechat row: keeps the session but makes it a normal top-level fork
 
 ![Right-click context menu on a session](docs/context-menu.png)
 
@@ -57,8 +58,9 @@ Sidechat rows show a branch glyph. A child row is indented under its parent; cli
 - The conversation is rendered by the shared embedded Conversation factory (`conversation.content` with `variant: 'embedded'`), which is why the sidechat looks and behaves identically to the main session.
 - `/side` is contributed to the client `commandUi` registry with `ui.kind: 'action'`, which runs in the browser and never sends a message or appends a session event.
 - Forking uses the native `sessions.fork()`; the tab is opened with `sidebarRight.openResource()`.
-- Parentage has two separate notions. A **sidechat** is a child only when this plugin recorded the fork in its link map (`dsh.sidechat.links.v1`); a **normal fork** is a full session, and its header lineage (republished by `index.js` as `projectionValues.sidechat.parentId`) is used solely for the fork glyph and its tooltip.
-- `index.js` registers that one projection; everything else is client-side.
+- Parentage has two separate notions. A **sidechat** is a child only when this plugin recorded the fork in its link map; a **normal fork** is a full session, and its header lineage (republished by `index.js` as `projectionValues.sidechat.parentId`) is used solely for the fork glyph and its tooltip.
+- **The link map lives on the host** (`<DSH_HOME>/storages/dsh-sidechat-links.json`, normally `~/.dsh/storages/`), because the Web UI is served on a new port each launch and browser storage is therefore a new origin every time. The client reads and writes it over exact `/api/sidechat/list|mark|unmark` routes on the shared gateway channel, with `localStorage` only as an instant same-run mirror. A restart (or a different browser) keeps the tree intact.
+- `index.js` registers the lineage projection and those three routes; the rest is client-side.
 
 ## Sidebar tree
 
@@ -72,6 +74,7 @@ The replacement:
 - nests each parent's sidechats beneath it with a chevron, connector line and their own relative times
 - keeps row actions (`branch`, `⋯`) as an absolutely-positioned overlay revealed on hover or focus, so opening them never shifts the list, and anchors the action menu to the row as a fixed popover
 - opens a right-click context menu per session with the copy actions (session ID, title, workspace path) plus rename / sidechat / fork / archive
+- offers **Attach as sidechat** on a fork row (re-nests a sidechat whose link was lost, e.g. one created before links moved to the host) and **Detach from parent** on a sidechat row
 
 Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu (group/sort/archive cycling is on the two header buttons), the shipped hover card (message count and sidechat list — copy actions now live in the right-click menu), and row motion animations. Turn it off with `/sidebar-tree` if you rely on those; the rest of the plugin keeps working either way.
 
@@ -79,7 +82,7 @@ Not yet in the replacement: drag-to-reorder rows, the shipped view-options menu 
 
 - **Fork boundary.** The fork uses the committed tail of the session, which is the end of the last completed assistant turn whenever the session is idle (the normal case). Starting a sidechat mid-stream captures the committed portion of the running turn.
 - **Nesting needs the sidebar tree.** With the tree turned off (`/sidebar-tree`), the default flat list is used and sidechats appear as sibling sessions (each still opens its own right-pane tab from the `⋯` menu).
-- **Links are per browser.** Sidechat nesting comes from the browser's own link map, so a sidechat opened from another browser or machine shows up as a normal fork row (with the fork glyph). Use the right-click **Detach from parent** to turn an old child row into a plain fork.
+- **Older sidechats may need re-attaching.** Links created before the host-side store existed lived in browser storage, which the Web UI's per-launch port wipes; those children now show as fork rows. Use the right-click **Attach as sidechat** to re-nest one, or **Detach from parent** to turn a child into a plain fork.
 - **Model selection.** The composer model selector follows the sidechat session's own selection, exactly like any other session.
 
 ## License

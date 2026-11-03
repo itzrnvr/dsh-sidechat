@@ -66,12 +66,26 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------------ *
      * Sidechat links — the durable parent → child map.
      *
-     * A native fork records no lineage on the child Session (its header has
-     * no parentSession/origin), and the shipped sidebar renders a flat list
-     * with no nested session rows. The relationship is therefore kept here,
-     * in browser storage, at the moment the fork happens.
+     * The Web UI is served on a new port every launch, so browser storage is a
+     * new origin each time and cannot be the source of truth. The host half
+     * persists the map in `<DSH_HOME>/storages/dsh-sidechat-links.json` and
+     * serves it over the plugin-owned `/sidechat` RPC channel; localStorage is
+     * kept only as an instant, same-run mirror plus an offline fallback.
      * ------------------------------------------------------------------ */
     const LINK_KEY = 'dsh.sidechat.links.v1';
+
+    /** Host-authoritative map, once the `/sidechat` channel answered. */
+    let hostLinks = null;
+    /** The Client `connection` service, when this shell provides it. */
+    let hostConnection = null;
+    /** Re-render hooks: sidebar rows read `parentOf` during render. */
+    const linkWatchers = new Set();
+
+    function notifyLinks() {
+      for (const watcher of linkWatchers) {
+        try { watcher(); } catch (_e) { /* ignore */ }
+      }
+    }
 
     function readLinks() {
       try {
@@ -83,16 +97,74 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function writeLocalLinks(links) {
+      try {
+        window.localStorage.setItem(LINK_KEY, JSON.stringify(links));
+      } catch (_e) { /* storage unavailable: the host map still works */ }
+    }
+
+    /** Host RPC helper for the plugin-owned `/api/sidechat/*` routes. */
+    function sidechatRpc(method, payload) {
+      if (hostConnection === null || typeof hostConnection.rpc?.call !== 'function') {
+        return Promise.reject(new Error('dsh-sidechat: connection service unavailable'));
+      }
+      return hostConnection.rpc.call('/api', `sidechat/${method}`, payload || {});
+    }
+
+    /** Load the durable map and merge this browser's local links into it. */
+    function refreshHostLinks() {
+      sidechatRpc('list').then((result) => {
+        if (!result || result.ok !== true) return;
+        const links = result.value?.links;
+        hostLinks = links && typeof links === 'object' ? links : {};
+        notifyLinks();
+
+        // Migrate links recorded in this browser (e.g. by an older version).
+        const local = readLinks();
+        const missing = Object.entries(local).filter(([child, parent]) => hostLinks[child] !== parent);
+        if (missing.length > 0) {
+          Promise.all(missing.map(([child, parent]) => sidechatRpc('mark', {
+            childSessionId: child,
+            parentSessionId: parent,
+          }).catch(() => undefined))).then((answers) => {
+            const last = answers.filter(Boolean).pop();
+            if (last && last.ok === true && last.value?.links) hostLinks = last.value.links;
+            for (const [child, parent] of missing) {
+              if (hostLinks[child] === undefined) hostLinks = { ...hostLinks, [child]: parent };
+            }
+            notifyLinks();
+          });
+        }
+      }).catch(() => { /* no host channel: stay on the local fallback */ });
+    }
+
     function rememberSidechat(parentSessionId, childSessionId) {
       if (!parentSessionId || !childSessionId) return;
-      try {
-        const links = readLinks();
-        links[childSessionId] = parentSessionId;
-        window.localStorage.setItem(LINK_KEY, JSON.stringify(links));
-      } catch (_e) { /* storage unavailable: nesting degrades, tabs still work */ }
+      const links = readLinks();
+      links[childSessionId] = parentSessionId;
+      writeLocalLinks(links);
+      if (hostLinks !== null) hostLinks = { ...hostLinks, [childSessionId]: parentSessionId };
+      sidechatRpc('mark', { childSessionId, parentSessionId }).catch(() => { /* fallback kept */ });
+      notifyLinks();
+    }
+
+    function forgetSidechat(childSessionId) {
+      const links = readLinks();
+      if (links[childSessionId] !== undefined) {
+        delete links[childSessionId];
+        writeLocalLinks(links);
+      }
+      if (hostLinks !== null && hostLinks[childSessionId] !== undefined) {
+        const next = { ...hostLinks };
+        delete next[childSessionId];
+        hostLinks = next;
+      }
+      sidechatRpc('unmark', { childSessionId }).catch(() => { /* fallback kept */ });
+      notifyLinks();
     }
 
     function parentOf(sessionId) {
+      if (hostLinks !== null && typeof hostLinks[sessionId] === 'string') return hostLinks[sessionId];
       return readLinks()[sessionId];
     }
 
@@ -679,15 +751,19 @@ window.__ModuleLoader__.load({
         });
       };
 
-      // Turn an old sidechat link into a plain fork (the child stays a real
-      // session; it just stops nesting). Useful for forks recorded as sidechats
-      // before the two kinds were separated.
+      // Turn a sidechat link into a plain fork (the child stays a real session;
+      // it just stops nesting). Works for old links as well as new ones.
       const detachSidechat = (id) => {
-        try {
-          const links = readLinks();
-          delete links[id];
-          window.localStorage.setItem(LINK_KEY, JSON.stringify(links));
-        } catch (_e) { /* storage unavailable */ }
+        forgetSidechat(id);
+        setMenu(null);
+        setLinksTick((value) => value + 1);
+      };
+
+      // Re-link an orphaned child (a sidechat whose browser link was lost on a
+      // port change) as a sidechat of the session it was forked from.
+      const attachSidechat = (id, parentId) => {
+        if (!parentId) return;
+        rememberSidechat(parentId, id);
         setMenu(null);
         setLinksTick((value) => value + 1);
       };
@@ -697,6 +773,15 @@ window.__ModuleLoader__.load({
         const timer = setTimeout(() => setToast(null), 1500);
         return () => clearTimeout(timer);
       }, [toast]);
+
+      // The durable link map arrives asynchronously from the host; re-render
+      // when it lands (or when a link is added/removed) so the tree updates.
+      React.useEffect(() => {
+        const bump = () => setLinksTick((value) => value + 1);
+        linkWatchers.add(bump);
+        bump();
+        return () => { linkWatchers.delete(bump); };
+      }, []);
 
       // Host content search, debounced.
       React.useEffect(() => {
@@ -1114,6 +1199,9 @@ window.__ModuleLoader__.load({
                     ['archive', 'Archive session', () => { setMenu(null); archiveSession(menu.id); }],
                     parentOf(menu.id) ? ['sep'] : null,
                     parentOf(menu.id) ? ['detach', 'Detach from parent', () => detachSidechat(menu.id)] : null,
+                    !parentOf(menu.id) && forkParentOf(sessions, menu.id)
+                      ? ['attach', 'Attach as sidechat', () => attachSidechat(menu.id, forkParentOf(sessions, menu.id))]
+                      : null,
                   ]
                 : [
                     ['rename', 'Rename', () => { setMenu(null); startRename(menu.id); }],
@@ -1374,6 +1462,15 @@ window.__ModuleLoader__.load({
         const openSidechatFor = (sessionId) => createSidechat(ctx, sessionId || currentSessionId);
         const withCreate = (Component) => (props) =>
           h(Component, { ...props, createSidechat: openSidechatFor, t });
+
+        // Durable sidechat links live on the host (the web UI gets a new port, and
+// therefore a new localStorage origin, on every launch). This channel is
+// optional: without it the plugin keeps the local map as its fallback.
+        ctx.inject(['connection'], (scope) => {
+          hostConnection = scope.connection;
+          refreshHostLinks();
+          ctx.effect(() => () => { hostConnection = null; }, 'dsh-sidechat: link channel');
+        });
 
         // `resources` and `sidebarRightTabs` are optional services: the
         // shipped reference reaches them through a nested inject so the
