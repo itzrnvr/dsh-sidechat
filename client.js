@@ -562,7 +562,10 @@ window.__ModuleLoader__.load({
     const REPLACE_FLAG = 'dsh.sidechat.replaceSidebar.v1';
     const VIEW_KEY = 'dsh.sidechat.sidebarView.v1';
     const COLLAPSED_KEY = 'dsh.sidechat.sidebarCollapsed.v1';
-    const PAGE_SIZE = 8;
+    // A group renders this many root rows before "Show more". It is deliberately
+    // large: restoring old sessions often pushes a parent/child pair below the
+    // fold, which looked like nesting had vanished.
+    const PAGE_SIZE = 50;
 
     /** The replacement is on unless it was explicitly turned off. */
     function replaceEnabled() {
