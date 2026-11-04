@@ -1137,12 +1137,17 @@ window.__ModuleLoader__.load({
       } else if (view.group === 'flat') {
         const ids = rootIds(groups.flatMap((group) => group.ids));
         const shown = ids.slice(0, limit.flat ?? PAGE_SIZE * 2);
+        // Keep linked families above the fold here too, so the flat list never
+        // hides a parent (and therefore its nested children) behind "Show more".
+        for (const id of ids) {
+          if (childMap.has(id) && !shown.includes(id)) shown.push(id);
+        }
         body = h(
           'div',
           { className: 'dsh-sb-list' },
           shown.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No sessions yet') : shown.map((id) => sessionRow(id, 0)),
           ids.length > shown.length
-            ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, flat: (l.flat ?? PAGE_SIZE * 2) + PAGE_SIZE })) }, 'Show more')
+            ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, flat: shown.length + PAGE_SIZE })) }, 'Show more')
             : null,
         );
       } else {
@@ -1202,8 +1207,8 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'dsh-sb-group-body' },
                     shown.length === 0 ? h('div', { className: 'dsh-sb-empty' }, 'No sessions') : shown.map((id) => sessionRow(id, 0)),
-                    ids.length > cap
-                      ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, [group.key]: cap + PAGE_SIZE })) }, `Show ${Math.min(PAGE_SIZE, ids.length - cap)} more`)
+                    ids.length > shown.length
+                      ? h('button', { type: 'button', className: 'dsh-sb-more', onClick: () => setLimit((l) => ({ ...l, [group.key]: shown.length + PAGE_SIZE })) }, `Show ${Math.min(PAGE_SIZE, ids.length - shown.length)} more`)
                       : null,
                   )
                 : null,
