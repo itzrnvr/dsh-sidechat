@@ -1154,7 +1154,13 @@ window.__ModuleLoader__.load({
             const open = collapsedGroups[group.key] !== true;
             const ids = rootIds(group.ids);
             const cap = limit[group.key] ?? PAGE_SIZE;
+            // Never let the fold split a linked family: a parent with nested
+            // children stays visible even when it is older than the cap, and
+            // its children render inside it.
             const shown = ids.slice(0, cap);
+            for (const id of ids) {
+              if (childMap.has(id) && !shown.includes(id)) shown.push(id);
+            }
             return h(
               'div',
               { key: group.key, className: 'dsh-sb-group' },

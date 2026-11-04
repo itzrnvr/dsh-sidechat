@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-sidechat",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "private": true,
   "type": "module",
   "description": "Branch a session into a sidechat that opens in the right split view.",
@@ -47,6 +47,7 @@
     }
   }
 }
+
 
 
 
