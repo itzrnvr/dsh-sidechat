@@ -666,6 +666,11 @@ window.__ModuleLoader__.load({
       const [collapsedTrees, setCollapsedTrees] = React.useState(() => readJson('dsh.sidechat.treeCollapsed.v1', {}));
       const [query, setQuery] = React.useState('');
       const [results, setResults] = React.useState(null);
+      const [messageSearchStatus, setMessageSearchStatus] = React.useState(null);
+      // Keep the latest session snapshot in a ref so the search effect can read
+      // titles at call time without re-triggering the debounce on every update.
+      const sessionsRef = React.useRef(sessions);
+      React.useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
       const [menu, setMenu] = React.useState(null);
       const [limit, setLimit] = React.useState({});
       const [renameFor, setRenameFor] = React.useState(null);
@@ -804,15 +809,58 @@ window.__ModuleLoader__.load({
         return () => { linkWatchers.delete(bump); };
       }, []);
 
-      // Host content search, debounced.
+      // Host content search, debounced. The host returns {sessionId, snippet} for
+      // message-body matches only; titles are matched locally from the in-memory
+      // snapshot (the host index does not cover titles). Both lists are merged.
       React.useEffect(() => {
         const term = query.trim();
-        if (!term) { setResults(null); return undefined; }
+        if (!term) { setResults(null); setMessageSearchStatus(null); return undefined; }
         const controller = new AbortController();
+        const lower = term.toLowerCase();
+        const snapshot = sessionsRef.current || {};
+        const titleHits = Object.entries(snapshot.byId || {})
+          .filter(([, summary]) => {
+            const title = summary?.displayTitle || summary?.title || '';
+            return title.toLowerCase().includes(lower);
+          })
+          .map(([id, summary]) => ({
+            id,
+            title: summary.displayTitle || summary.title || 'New Session',
+            snippet: '',
+            workspace: '',
+          }));
         const timer = setTimeout(() => {
+          // Show title hits immediately (synchronously) so the user sees
+          // something while the host message search settles.
+          setResults({ items: titleHits, hasMore: false });
+          setMessageSearchStatus('searching');
           Promise.resolve(services.sessions?.search?.(term, controller.signal))
-            .then((result) => { if (!controller.signal.aborted) setResults(result?.ok === false ? { items: [] } : result?.value ?? result ?? { items: [] }); })
-            .catch(() => { if (!controller.signal.aborted) setResults({ items: [] }); });
+            .then((result) => {
+              if (controller.signal.aborted) return;
+              const raw = result?.ok === false ? [] : (result?.value ?? result ?? {}).items ?? [];
+              if (result?.ok === false) {
+                setMessageSearchStatus('unavailable');
+              } else {
+                setMessageSearchStatus(raw.length > 0 ? 'found' : 'empty');
+              }
+              const messageHits = raw.map((item) => ({
+                id: item.sessionId ?? item.id,
+                snippet: item.snippet ?? '',
+                title: item.title ?? (snapshot.byId?.[item.sessionId ?? item.id]?.displayTitle
+                  ?? snapshot.byId?.[item.sessionId ?? item.id]?.title
+                  ?? 'New Session'),
+                workspace: item.workspace ?? '',
+              }));
+              const seen = new Set(titleHits.map((item) => item.id));
+              const merged = [...titleHits, ...messageHits.filter((item) => !seen.has(item.id))];
+              setResults({ items: merged, hasMore: (result?.value ?? result ?? {}).hasMore ?? false });
+            })
+            .catch(() => {
+              if (!controller.signal.aborted) {
+                setMessageSearchStatus('unavailable');
+                setResults({ items: titleHits, hasMore: false });
+              }
+            });
         }, 220);
         return () => { clearTimeout(timer); controller.abort(); };
       }, [query, services]);
@@ -877,6 +925,54 @@ window.__ModuleLoader__.load({
           }
         } catch (_e) { /* fall back to the plain open */ }
         openMain(id);
+      };
+
+      // Highlight a message bubble and scroll to it after a search-result jump.
+      // If the message is paged out of the loaded window, page the session's
+      // own history forward until it appears (bounded so we don't loop forever).
+      const flashMessage = (needle, sessionId) => {
+        if (!needle) return;
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const target = norm(needle);
+        if (!target) return;
+        let attempts = 0;
+        const scan = () => {
+          attempts += 1;
+          const candidates = document.querySelectorAll('[data-chat-node-key]');
+          let best = null;
+          for (const node of candidates) {
+            const text = norm(node.textContent);
+            if (text.includes(target)) { best = node; break; }
+          }
+          if (best) {
+            try {
+              best.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const bubble = best.querySelector('[data-message-bubble]') || best;
+              bubble.style.transition = 'background-color 0.2s';
+              bubble.style.backgroundColor = 'rgba(255, 193, 7, 0.35)';
+              setTimeout(() => { bubble.style.backgroundColor = ''; }, 1800);
+            } catch (_e) { /* ignore */ }
+            return;
+          }
+          if (attempts > 40) return;
+          if (attempts === 10 || attempts === 20 || attempts === 30) {
+            // Page the session's history forward through the host's own API
+            // instead of clicking DOM buttons (which could hit unrelated controls).
+            try {
+              services.sessions?.using?.(sessionId, { source: 'sidebarSearchJump' }, (ref) => ref?.binding?.session?.loadOlder?.());
+            } catch (_e) { /* ignore */ }
+          }
+          setTimeout(scan, 250);
+        };
+        setTimeout(scan, 600);
+      };
+
+      // Jump to a search hit: open the session, then scroll the matching message.
+      // The host's own session.loadOlder() / loadThrough() paging is used to
+      // bring paged-out messages into the DOM window before the DOM scan.
+      const jumpToMessage = (id, snippet) => {
+        openSession(id);
+        flashMessage(snippet, id);
       };
       const titleOf = (id) => byId[id]?.displayTitle || byId[id]?.title || 'New Session';
 
@@ -1112,27 +1208,40 @@ window.__ModuleLoader__.load({
       let body;
       if (query.trim()) {
         const items = results?.items ?? [];
+        const statusMsg = messageSearchStatus === 'unavailable'
+          ? 'Message search unavailable (host error)'
+          : messageSearchStatus === 'empty' && items.length === 0
+            ? 'No matches found'
+            : messageSearchStatus === 'searching' && items.length === 0
+              ? 'Searching…'
+              : null;
         body = h(
           'div',
           { className: 'dsh-sb-list' },
           results === null
             ? h('div', { className: 'dsh-sb-empty' }, 'Searching…')
             : items.length === 0
-              ? h('div', { className: 'dsh-sb-empty' }, 'No sessions found')
+              ? h('div', { className: 'dsh-sb-empty' }, statusMsg || 'No messages found')
               : items.map((item, index) =>
                   h(
                     'div',
                     {
                       key: item.id || `r-${index}`,
                       className: 'dsh-sb-row dsh-sb-result',
+                      'data-session-id': item.id,
                       role: 'treeitem',
-                      onClick: () => openSession(item.id),
+                      onClick: () => jumpToMessage(item.id, item.snippet),
                     },
                     h('span', { className: 'dsh-sb-dot is-idle', 'aria-hidden': true }),
                     h('span', { className: 'dsh-sb-title' }, item.title || item.id),
-                    h('span', { className: 'dsh-sb-time' }, item.workspace || ''),
+                    item.snippet
+                      ? h('div', { className: 'dsh-sb-snippet' }, item.snippet)
+                      : h('span', { className: 'dsh-sb-time' }, item.workspace || ''),
                   ),
                 ),
+          statusMsg && items.length > 0
+            ? h('div', { className: 'dsh-sb-empty' }, statusMsg)
+            : null,
         );
       } else if (view.group === 'flat') {
         const ids = rootIds(groups.flatMap((group) => group.ids));
@@ -1446,6 +1555,16 @@ window.__ModuleLoader__.load({
       '.dsh-sb-more:hover{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);}',
       '.dsh-sb-empty{color:var(--dsw-alias-label-secondary);font-size:11.5px;padding:8px 10px;}',
       '.dsh-sb-result{cursor:pointer;}',
+      '.dsh-sb-snippet{',
+      '  font-size:11px;',
+      '  color:var(--dsw-alias-text-tertiary,#888);',
+      '  margin-top:1px;',
+      '  overflow:hidden;',
+      '  display:-webkit-box;',
+      '  -webkit-line-clamp:2;',
+      '  -webkit-box-orient:vertical;',
+      '  white-space:normal;',
+      '}',
       '.dsh-sb-add{',
       'align-items:center;background:transparent;border:0;border-radius:var(--dsw-radius-sm,6px);',
       'color:var(--dsw-alias-label-secondary);cursor:pointer;display:flex;flex:none;font:inherit;',
